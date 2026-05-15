@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HR Analytics Hub</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    /* CSS Reset & Variables */
+    :root { 
+      --primary: #2563eb; --primary-hover: #1d4ed8; 
+      --bg: #f1f5f9; --surface: #ffffff; 
+      --text-main: #0f172a; --text-muted: #64748b; 
+      --border: #e2e8f0; --danger: #ef4444; --success: #10b981;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text-main); margin: 0; display: flex; height: 100vh; overflow: hidden; }
+    
+    /* Layout */
+    .sidebar { width: 380px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; z-index: 10; box-shadow: 4px 0 15px rgba(0,0,0,0.03); }
+    .main-content { flex: 1; padding: 32px; overflow-y: auto; display: flex; flex-direction: column; gap: 24px; }
+    
+    /* Sidebar Components */
+    .brand-header { padding: 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    .brand-header h1 { margin: 0; font-size: 1.25rem; font-weight: 700; color: var(--primary); }
+    .brand-header i { font-size: 1.5rem; color: var(--primary); }
+    
+    .data-ingress { padding: 24px; border-bottom: 1px solid var(--border); background: #f8fafc; }
+    .upload-btn { display: flex; justify-content: center; align-items: center; gap: 8px; background: var(--primary); color: white; padding: 12px; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.2s ease; }
+    .upload-btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
+    input[type="file"] { display: none; }
+    .status-indicator { margin-top: 12px; font-size: 0.85rem; text-align: center; font-weight: 500; color: var(--text-muted); display: flex; align-items: center; justify-content: center; gap: 6px; }
+    
+    /* Chat Interface */
+    .chat-module { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
+    .chat-header { padding: 16px 24px; background: var(--surface); font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid var(--border); color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .chat-stream { flex: 1; padding: 24px; overflow-y: auto; font-size: 0.95rem; display: flex; flex-direction: column; gap: 16px; }
+    
+    .msg-bubble { padding: 14px 18px; border-radius: 12px; max-width: 88%; line-height: 1.6; animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+    .msg-bubble.user { background: #eff6ff; color: #1e3a8a; align-self: flex-end; border-bottom-right-radius: 2px; }
+    .msg-bubble.bot { background: #ffffff; border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 2px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+    
+    .msg-bubble.bot p { margin: 0 0 12px 0; } .msg-bubble.bot p:last-child { margin: 0; }
+    .msg-bubble.bot table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.85rem; }
+    .msg-bubble.bot th, .msg-bubble.bot td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+    .msg-bubble.bot th { background: #f8fafc; font-weight: 600; }
+    
+    .chat-controls { display: flex; padding: 16px; border-top: 1px solid var(--border); background: var(--surface); }
+    .chat-controls input { flex: 1; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px 0 0 8px; outline: none; transition: border 0.2s; font-family: inherit; }
+    .chat-controls input:focus { border-color: var(--primary); }
+    .chat-controls button { background: var(--primary); color: white; border: none; padding: 12px 20px; border-radius: 0 8px 8px 0; cursor: pointer; transition: background 0.2s; }
+    .chat-controls button:hover { background: var(--primary-hover); }
+    .chat-controls button:disabled { background: var(--text-muted); cursor: not-allowed; }
+
+    /* Dashboard UI */
+    .dash-header h2 { margin: 0; font-size: 1.75rem; color: var(--text-main); font-weight: 700; }
+    
+    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; }
+    .metric-card { background: var(--surface); padding: 24px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+    .metric-icon { width: 60px; height: 60px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.75rem; }
+    .ic-blue { background: #eff6ff; color: #3b82f6; } .ic-green { background: #f0fdf4; color: #22c55e; }
+    .ic-purple { background: #faf5ff; color: #a855f7; } .ic-orange { background: #fff7ed; color: #f97316; }
+    .metric-info h3 { margin: 0; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; }
+    .metric-info p { margin: 4px 0 0 0; font-size: 1.75rem; font-weight: 700; color: var(--text-main); }
+
+    .visualizations-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .viz-card { background: var(--surface); padding: 24px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid var(--border); }
+    .viz-card h3 { margin: 0 0 20px 0; font-size: 1.1rem; color: var(--text-main); font-weight: 600; }
+    .viz-card.wide { grid-column: span 2; }
+    .canvas-wrap { position: relative; height: 320px; width: 100%; }
+  </style>
+</head>
+<body>
+
+  <!-- Left Sidebar -->
+  <aside class="sidebar">
+    <div class="brand-header">
+      <i class="fa-solid fa-layer-group"></i>
+      <h1>HR Data Matrix</h1>
+    </div>
+
+    <div class="data-ingress">
+      <label for="fileUpload" class="upload-btn">
+        <i class="fa-solid fa-cloud-arrow-up"></i> Ingest CSV Dataset
+      </label>
+      <input type="file" id="fileUpload" accept=".csv" onchange="AppController.handleFileUpload(event)">
+      <div id="statusMessage" class="status-indicator">Awaiting Data...</div>
+    </div>
+
+    <div class="chat-module">
+      <div class="chat-header"><i class="fa-solid fa-microchip"></i> AI Analyst Ready</div>
+      <div class="chat-stream" id="chatHistory">
+        <div class="msg-bubble bot">System initialized. Please ingest a dataset to begin multidimensional analysis.</div>
+      </div>
+      <div class="chat-controls">
+        <input type="text" id="chatInput" placeholder="Query the dataset..." onkeypress="if(event.key === 'Enter') AppController.submitQuery()">
+        <button id="sendBtn" onclick="AppController.submitQuery()"><i class="fa-solid fa-paper-plane"></i></button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Dashboard -->
+  <main class="main-content">
+    <header class="dash-header">
+      <h2>Workforce Intelligence</h2>
+    </header>
+
+    <section class="metrics-grid">
+      <article class="metric-card">
+        <div class="metric-icon ic-blue"><i class="fa-solid fa-users-viewfinder"></i></div>
+        <div class="metric-info"><h3>Active Headcount</h3><p id="kpi-headcount">-</p></div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-icon ic-green"><i class="fa-solid fa-sack-dollar"></i></div>
+        <div class="metric-info"><h3>Avg Compensation</h3><p id="kpi-salary">-</p></div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-icon ic-purple"><i class="fa-solid fa-sitemap"></i></div>
+        <div class="metric-info"><h3>Departments</h3><p id="kpi-depts">-</p></div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-icon ic-orange"><i class="fa-solid fa-person-walking-arrow-right"></i></div>
+        <div class="metric-info"><h3>Attrition Rate</h3><p id="kpi-turnover">-</p></div>
+      </article>
+    </section>
+
+    <section class="visualizations-grid">
+      <article class="viz-card">
+        <h3>Distribution by Department</h3>
+        <div class="canvas-wrap"><canvas id="deptChart"></canvas></div>
+      </article>
+      <article class="viz-card">
+        <h3>Gender Diversity</h3>
+        <div class="canvas-wrap"><canvas id="genderChart"></canvas></div>
+      </article>
+      <article class="viz-card wide">
+        <h3>Compensation Curve Analysis</h3>
+        <div class="canvas-wrap" style="height: 350px;"><canvas id="salaryChart"></canvas></div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    /**
+     * Application State & Logic Controller
+     * Encapsulating functionality into a class prevents global namespace pollution
+     * and strictly adheres to modern JavaScript engineering practices.
+     */
+    const AppController = (() => {
+      // Private State
+      let _dataset = [];
+      let _aiContextStr = "";
+      let _chartInstances = {};
+
+      // DOM Elements
+      const UI = {
+        status: document.getElementById('statusMessage'),
+        chatInput: document.getElementById('chatInput'),
+        chatHistory: document.getElementById('chatHistory'),
+        sendBtn: document.getElementById('sendBtn'),
+        kpis: {
+          headcount: document.getElementById('kpi-headcount'),
+          salary: document.getElementById('kpi-salary'),
+          depts: document.getElementById('kpi-depts'),
+          turnover: document.getElementById('kpi-turnover')
+        }
+      };
+
+      // Configuration
+      Chart.defaults.font.family = "'Inter', sans-serif";
+      Chart.defaults.color = '#64748b';
+
+      /**
+       * Primary Ingress Pipeline
+       */
+      const handleFileUpload = (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        UI.status.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Parsing Dataset...`;
+        UI.status.style.color = "var(--primary)";
+
+        Papa.parse(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (results) => executeETL(results.data),
+          error: (err) => {
+            UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error: ${err.message}`;
+            UI.status.style.color = "var(--danger)";
+          }
+        });
+      };
+
+      /**
+       * Transform & Cleanse Data (The 'T' in ETL)
+       */
+      const executeETL = (rawArray) => {
+        _dataset = rawArray.map(row => {
+          // Dynamic Header Resolution (Robust to schema variations)
+          const findKey = (str) => Object.keys(row).find(k => k.toLowerCase().includes(str.toLowerCase()));
+          
+          const rawSalary = row[findKey('salary') || findKey('pay')] || '0';
+          const cleanSalary = parseFloat(rawSalary.toString().replace(/[^0-9.-]+/g, ""));
+          
+          const rawStatus = row[findKey('status') || findKey('active')] || 'Active';
+          const isTerminated = /term|inactive/i.test(rawStatus);
+
+          return {
+            id: row[findKey('id') || findKey('emp')] || 'N/A',
+            department: row[findKey('department') || findKey('dept')] || 'Unassigned',
+            salary: isNaN(cleanSalary) ? 0 : cleanSalary,
+            status: isTerminated ? 'Terminated' : 'Active',
+            gender: (row[findKey('gender') || findKey('sex')] || 'Not Specified').trim()
+          };
+        });
+
+        UI.status.innerHTML = `<i class="fa-solid fa-circle-check"></i> Ingested ${_dataset.length.toLocaleString()} records`;
+        UI.status.style.color = "var(--success)";
+        
+        updateIntelligenceDashboard();
+      };
+
+      /**
+       * Analytics Engine & UI Render
+       */
+      const updateIntelligenceDashboard = () => {
+        if (!_dataset.length) return;
+
+        // 1. Compute Aggregations
+        const total = _dataset.length;
+        const active = _dataset.filter(e => e.status === 'Active').length;
+        const turnoverRate = total ? (((total - active) / total) * 100).toFixed(1) + '%' : '0%';
+        const avgSal = Math.round(_dataset.reduce((acc, curr) => acc + curr.salary, 0) / total);
+
+        const mappings = { dept: {}, gender: {} };
+        
+        _dataset.forEach(e => {
+          if (!mappings.dept[e.department]) mappings.dept[e.department] = { count: 0, salarySum: 0 };
+          mappings.dept[e.department].count++;
+          mappings.dept[e.department].salarySum += e.salary;
+          if (e.status === 'Active') mappings.gender[e.gender] = (mappings.gender[e.gender] || 0) + 1;
+        });
+
+        // 2. Update KPI Layer
+        UI.kpis.headcount.innerText = active.toLocaleString();
+        UI.kpis.salary.innerText = `$${avgSal.toLocaleString()}`;
+        UI.kpis.depts.innerText = Object.keys(mappings.dept).length;
+        UI.kpis.turnover.innerText = turnoverRate;
+
+        // 3. Build AI Context Vector
+        buildAiContext(total, active, avgSal, turnoverRate, mappings.dept, mappings.gender);
+
+        // 4. Render Visualizations
+        renderVisuals(mappings.dept, mappings.gender);
+      };
+
+      const buildAiContext = (tot, act, sal, turn, depts, genders) => {
+        const deptStr = Object.entries(depts).map(([d, val]) => `${d}: ${val.count} staff (Avg $${Math.round(val.salarySum/val.count)})`).join('; ');
+        const genStr = Object.entries(genders).map(([g, c]) => `${g}: ${c}`).join(', ');
+        
+        _aiContextStr = `System Data Summary: Total Historical Employees: ${tot}. Current Active: ${act}. Attrition Rate: ${turn}. Company Avg Salary: $${sal}. Gender Demographics: ${genStr}. Departmental Breakdown: ${deptStr}.`;
+      };
+
+      const renderVisuals = (depts, genders) => {
+        const resetChart = (id) => { if(_chartInstances[id]) _chartInstances[id].destroy(); };
+        const labels = Object.keys(depts);
+
+        // Chart: Departments
+        resetChart('dept');
+        _chartInstances['dept'] = new Chart(document.getElementById('deptChart'), {
+          type: 'bar',
+          data: { labels, datasets: [{ data: labels.map(l => depts[l].count), backgroundColor: '#3b82f6', borderRadius: 6 }] },
+          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+        });
+
+        // Chart: Gender
+        resetChart('gender');
+        _chartInstances['gender'] = new Chart(document.getElementById('genderChart'), {
+          type: 'doughnut',
+          data: { labels: Object.keys(genders), datasets: [{ data: Object.values(genders), backgroundColor: ['#8b5cf6', '#06b6d4', '#f43f5e', '#cbd5e1'] }] },
+          options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'right' } } }
+        });
+
+        // Chart: Salary Curve
+        resetChart('salary');
+        _chartInstances['salary'] = new Chart(document.getElementById('salaryChart'), {
+          type: 'line',
+          data: { labels, datasets: [{ label: 'Average Compensation', data: labels.map(l => depts[l].salarySum / depts[l].count), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.05)', fill: true, tension: 0.3 }] },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      };
+
+      /**
+       * AI Communication Interface
+       */
+      const submitQuery = () => {
+        const query = UI.chatInput.value.trim();
+        if (!query) return;
+
+        appendChatMessage('user', query);
+        UI.chatInput.value = '';
+        UI.chatInput.disabled = true;
+        UI.sendBtn.disabled = true;
+
+        const loadId = `load-${Date.now()}`;
+        appendChatMessage('bot', '<i class="fa-solid fa-circle-notch fa-spin"></i> Processing query...', loadId);
+
+        google.script.run
+          .withSuccessHandler((response) => {
+            document.getElementById(loadId).remove();
+            appendChatMessage('bot', marked.parse(response));
+            resetChatState();
+          })
+          .withFailureHandler((error) => {
+            document.getElementById(loadId).remove();
+            appendChatMessage('bot', `<span style="color:var(--danger)">Connection Error: ${error.message}</span>`);
+            resetChatState();
+          })
+          .askChatbot(query, _aiContextStr || "No dataset ingested yet. Awaiting data.");
+      };
+
+      const resetChatState = () => {
+        UI.chatInput.disabled = false;
+        UI.sendBtn.disabled = false;
+        UI.chatInput.focus();
+      };
+
+      const appendChatMessage = (sender, content, id = null) => {
+        const msg = document.createElement('div');
+        msg.className = `msg-bubble ${sender}`;
+        if (id) msg.id = id;
+        msg.innerHTML = content;
+        UI.chatHistory.appendChild(msg);
+        UI.chatHistory.scrollTop = UI.chatHistory.scrollHeight;
+      };
+
+      // Public API
+      return {
+        handleFileUpload,
+        submitQuery
+      };
+    })();
+  </script>
+</body>
+</html>
