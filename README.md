@@ -1,13 +1,28 @@
-# 📊 HR Analytics AI Hub
+# HR Analytics AI Hub
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Google Apps Script](https://img.shields.io/badge/Google%20Apps%20Script-4285F4?style=flat&logo=google&logoColor=white)](https://developers.google.com/apps-script)
-[![Gemini API](https://img.shields.io/badge/Gemini%20API-10b981?style=flat&logo=google&logoColor=white)](https://ai.google.dev/)
-[![ES6](https://img.shields.io/badge/ES6-F7DF1E?style=flat&logo=javascript&logoColor=black)](https://www.ecma-international.org/ecma-262/6.0/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![Google Apps Script](https://img.shields.io/badge/Google_Apps_Script-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://developers.google.com/apps-script)
+[![Gemini API](https://img.shields.io/badge/Gemini_API-10b981?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
+[![ES6](https://img.shields.io/badge/ES6-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)](https://www.ecma-international.org/ecma-262/6.0/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](http://makeapullrequest.com)
 
 An advanced, serverless Single-Page Application (SPA) built on Google Apps Script. This tool empowers HR professionals to upload raw CSV datasets, processes the data entirely in-memory (client-side) for maximum privacy and speed, and generates interactive dashboards alongside a **Gemini-powered AI chatbot**.
 
-## 🏗️ Architecture & Engineering Approach
+---
+
+## Table of Contents
+- [Architecture & Engineering Approach](#architecture--engineering-approach)
+- [Core Features](#core-features)
+- [Setup & Local Development](#setup--local-development)
+- [Configuration & Security](#configuration--security)
+- [Deployment](#deployment)
+- [Repository Structure](#repository-structure)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Architecture & Engineering Approach
 
 This project abandons the traditional "read/write to Google Sheets" approach in Apps Script in favor of a modern, fast SPA architecture.
 
@@ -17,7 +32,7 @@ This project abandons the traditional "read/write to Google Sheets" approach in 
 
 ---
 
-## 📸 Core Features
+## Core Features
 
 1. **Local Data Ingestion**: Zero-server data uploads. Secure browser-side CSV processing.
 2. **Dynamic KPI Dashboard**: Automatic aggregation of Active Headcount, Average Compensation, Attrition Rate, and Department counts.
@@ -26,7 +41,7 @@ This project abandons the traditional "read/write to Google Sheets" approach in 
 
 ---
 
-## 🚀 Setup & Local Development
+## Setup & Local Development
 
 This repository uses [clasp (Command Line Apps Script Projects)](https://github.com/google/clasp) for local development.
 
@@ -58,7 +73,7 @@ clasp push
 
 ---
 
-## 🔒 Configuration & Security
+## Configuration & Security
 
 **Never hardcode your API keys.** Follow these steps to securely configure Gemini:
 
@@ -74,7 +89,7 @@ clasp push
 
 ---
 
-## 🌍 Deployment
+## Deployment
 
 To release the application to users:
 1. In the Apps Script UI, click **Deploy** > **New Deployment**.
@@ -85,11 +100,12 @@ To release the application to users:
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 
 ```text
 hr-analytics-hub/
 ├── .github/                 # GitHub specific configurations (Templates, Actions)
+├── docs/                    # Architectural and data flow documentation
 ├── src/
 │   ├── Code.js              # Server-side API endpoints & App Service
 │   └── Index.html           # Frontend UI, CSS, and Client-side AppController
@@ -98,11 +114,11 @@ hr-analytics-hub/
 └── README.md                # Documentation
 ```
 
-## 🤝 Contributing
+## Contributing
 
 Contributions, issues, and feature requests are welcome! 
 Check out the [CONTRIBUTING.md](./CONTRIBUTING.md) and [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md) for standard guidelines.
 
-## 📄 License
+## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
