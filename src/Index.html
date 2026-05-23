@@ -1,554 +1,1118 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <title>HR Analytics Hub</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <!-- Inline micro-libraries (ES5 only — compatible with GAS Caja sandbox) -->
-  <script>
-  /* ===== Micro CSV Parser ===== */
-  var MiniCSV = {
-    parse: function(text) {
-      var rows = [], cur = [], field = '', inQ = false, i, c, nc;
-      for (i = 0; i < text.length; i++) {
-        c = text[i]; nc = text[i+1];
-        if (inQ) {
-          if (c === '"' && nc === '"') { field += '"'; i++; }
-          else if (c === '"') { inQ = false; }
-          else { field += c; }
-        } else {
-          if (c === '"') { inQ = true; }
-          else if (c === ',') { cur.push(field); field = ''; }
-          else if (c === '\n' || (c === '\r' && nc === '\n')) {
-            cur.push(field); field = '';
-            if (c === '\r') i++;
-            rows.push(cur); cur = [];
-          } else if (c === '\r') { cur.push(field); field = ''; rows.push(cur); cur = []; }
-          else { field += c; }
-        }
-      }
-      cur.push(field); if (cur.length > 1 || cur[0] !== '') rows.push(cur);
-      if (rows.length < 2) return [];
-      var headers = rows[0], out = [];
-      for (var r = 1; r < rows.length; r++) {
-        if (rows[r].length === 0 || (rows[r].length === 1 && rows[r][0] === '')) continue;
-        var obj = {};
-        for (var h = 0; h < headers.length; h++) obj[headers[h]] = (rows[r][h] || '').trim();
-        out.push(obj);
-      }
-      return out;
-    }
-  };
 
-  /* ===== Micro XLSX Parser (reads .xlsx ZIP structure) ===== */
-  var MiniXLSX = {
-    parse: function(arrayBuffer, callback) {
-      /* XLSX is a ZIP. We use a minimal ZIP reader. */
-      try {
-        var data = new Uint8Array(arrayBuffer);
-        /* Find all local file headers (PK\x03\x04) */
-        var files = {}, i = 0;
-        while (i < data.length - 4) {
-          if (data[i]===0x50&&data[i+1]===0x4B&&data[i+2]===0x03&&data[i+3]===0x04) {
-            var comp = data[i+8]|(data[i+9]<<8);
-            var csize = data[i+18]|(data[i+19]<<8)|(data[i+20]<<16)|(data[i+21]<<24);
-            var usize = data[i+22]|(data[i+23]<<8)|(data[i+24]<<16)|(data[i+25]<<24);
-            var fnLen = data[i+26]|(data[i+27]<<8);
-            var extLen = data[i+28]|(data[i+29]<<8);
-            var fnStart = i + 30;
-            var fn = String.fromCharCode.apply(null, data.subarray(fnStart, fnStart+fnLen));
-            var dStart = fnStart + fnLen + extLen;
-            var raw = data.subarray(dStart, dStart + csize);
-            if (comp === 0) {
-              files[fn] = raw;
-            } else if (comp === 8) {
-              try { files[fn] = pako_inflate(raw); } catch(e) { files[fn] = raw; }
-            }
-            i = dStart + csize;
-          } else { i++; }
-        }
-        /* Find first sheet XML */
-        var sheetXml = null;
-        var sheetKeys = Object.keys(files);
-        for (var k = 0; k < sheetKeys.length; k++) {
-          if (/xl\/worksheets\/sheet1/.test(sheetKeys[k])) {
-            sheetXml = MiniXLSX._u8ToString(files[sheetKeys[k]]); break;
-          }
-        }
-        /* Parse shared strings */
-        var sst = [];
-        for (var sk = 0; sk < sheetKeys.length; sk++) {
-          if (/sharedStrings/.test(sheetKeys[sk])) {
-            var sstXml = MiniXLSX._u8ToString(files[sheetKeys[sk]]);
-            var siRe = /<si>([\s\S]*?)<\/si>/g, siM;
-            while ((siM = siRe.exec(sstXml)) !== null) {
-              var tAll = '', tRe = /<t[^>]*>([^<]*)<\/t>/g, tM;
-              while ((tM = tRe.exec(siM[1])) !== null) tAll += tM[1];
-              sst.push(tAll.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#39;/g,"'").replace(/&quot;/g,'"'));
-            }
-            break;
-          }
-        }
-        if (!sheetXml) { callback([]); return; }
-        /* Parse rows */
-        var rows = [], rowRe = /<row[^>]*>([\s\S]*?)<\/row>/g, rowM;
-        while ((rowM = rowRe.exec(sheetXml)) !== null) {
-          var cells = [], cellRe = /<c r="([A-Z]+)(\d+)"([^>]*)>([\s\S]*?)<\/c>/g, cM;
-          while ((cM = cellRe.exec(rowM[1])) !== null) {
-            var col = MiniXLSX._colIdx(cM[1]);
-            var attr = cM[3], inner = cM[4];
-            var vM = /<v>([^<]*)<\/v>/.exec(inner);
-            var val = vM ? vM[1] : '';
-            if (/t="s"/.test(attr)) val = sst[parseInt(val, 10)] || '';
-            while (cells.length < col) cells.push('');
-            cells[col] = val;
-          }
-          rows.push(cells);
-        }
-        if (rows.length < 2) { callback([]); return; }
-        var headers = rows[0], out = [];
-        for (var r = 1; r < rows.length; r++) {
-          var isEmpty = true;
-          for (var ci = 0; ci < rows[r].length; ci++) { if (rows[r][ci]) { isEmpty = false; break; } }
-          if (isEmpty) continue;
-          var obj = {};
-          for (var h = 0; h < headers.length; h++) obj[headers[h] || 'Col'+h] = (rows[r][h] || '').toString().trim();
-          out.push(obj);
-        }
-        callback(out);
-      } catch(e) { console.error('XLSX parse error:', e); callback([]); }
-    },
-    _u8ToString: function(u8) {
-      var out = '', chunk = 8192;
-      for (var i = 0; i < u8.length; i += chunk) {
-        out += String.fromCharCode.apply(null, u8.subarray(i, i+chunk));
-      }
-      return decodeURIComponent(escape(out));
-    },
-    _colIdx: function(letters) {
-      var n = 0;
-      for (var i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
-      return n - 1;
-    }
-  };
-
-  /* ===== Micro Canvas Chart Engine ===== */
-  var MiniChart = {
-    _instances: {},
-    create: function(canvasId, config) {
-      var canvas = document.getElementById(canvasId);
-      if (!canvas) return null;
-      /* Destroy previous */
-      if (MiniChart._instances[canvasId]) {
-        MiniChart._instances[canvasId] = null;
-      }
-      var inst = { canvas: canvas, config: config };
-      MiniChart._instances[canvasId] = inst;
-      MiniChart._draw(inst);
-      return { destroy: function() { MiniChart._instances[canvasId] = null; var ctx = canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); } };
-    },
-    _draw: function(inst) {
-      var canvas = inst.canvas, cfg = inst.config;
-      var ctx = canvas.getContext('2d');
-      canvas.width = canvas.offsetWidth || canvas.parentElement.offsetWidth || 300;
-      canvas.height = canvas.offsetHeight || 200;
-      var W = canvas.width, H = canvas.height;
-      ctx.clearRect(0,0,W,H);
-      if (cfg.type === 'bar' || cfg.type === 'line') {
-        MiniChart._drawBarLine(ctx, W, H, cfg);
-      } else if (cfg.type === 'doughnut') {
-        MiniChart._drawDoughnut(ctx, W, H, cfg);
-      }
-    },
-    _drawBarLine: function(ctx, W, H, cfg) {
-      var pad = {top:20, right:20, bottom:60, left:65};
-      var data = cfg.data, labels = data.labels || [];
-      /* Collect all values */
-      var allVals = [];
-      for (var di = 0; di < data.datasets.length; di++) {
-        var ds = data.datasets[di];
-        for (var vi = 0; vi < ds.data.length; vi++) allVals.push(ds.data[vi] || 0);
-      }
-      var maxVal = Math.max.apply(null, allVals) || 1;
-      var chartW = W - pad.left - pad.right;
-      var chartH = H - pad.top - pad.bottom;
-      /* Grid */
-      ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
-      var gridLines = 5;
-      for (var g = 0; g <= gridLines; g++) {
-        var y = pad.top + chartH - (g / gridLines) * chartH;
-        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + chartW, y); ctx.stroke();
-        var lbl = MiniChart._fmtVal(maxVal * g / gridLines);
-        ctx.fillStyle='#94a3b8'; ctx.font='10px Inter,sans-serif'; ctx.textAlign='right';
-        ctx.fillText(lbl, pad.left - 6, y + 3);
-      }
-      var numDs = data.datasets.length;
-      var barW = Math.max(4, (chartW / Math.max(labels.length, 1)) - 8);
-      var groupW = barW * numDs + (numDs - 1) * 2;
-      /* Draw each dataset */
-      var colors = ['#3b82f6','#ec4899','#10b981','#f59e0b','#8b5cf6'];
-      for (var di2 = 0; di2 < data.datasets.length; di2++) {
-        var ds2 = data.datasets[di2];
-        var col = ds2.backgroundColor || colors[di2 % colors.length];
-        ctx.fillStyle = col; ctx.strokeStyle = ds2.borderColor || col; ctx.lineWidth = 2;
-        var prevX = -1, prevY = -1;
-        for (var vi2 = 0; vi2 < labels.length; vi2++) {
-          var x = pad.left + (vi2 / labels.length) * chartW + chartW / (2 * labels.length);
-          var val2 = ds2.data[vi2] || 0;
-          var barH = (val2 / maxVal) * chartH;
-          var y2 = pad.top + chartH - barH;
-          if (cfg.type === 'bar') {
-            var bx = x - groupW/2 + di2 * (barW + 2);
-            ctx.fillRect(bx, y2, barW, barH);
-          } else {
-            if (prevX >= 0) {
-              ctx.beginPath(); ctx.moveTo(prevX, prevY); ctx.lineTo(x, y2); ctx.stroke();
-            }
-            ctx.beginPath(); ctx.arc(x, y2, 3, 0, 2*Math.PI); ctx.fillStyle = col; ctx.fill();
-            prevX = x; prevY = y2;
-          }
-        }
-      }
-      /* X labels */
-      ctx.fillStyle='#64748b'; ctx.font='10px Inter,sans-serif'; ctx.textAlign='center';
-      for (var li = 0; li < labels.length; li++) {
-        var lx = pad.left + (li / labels.length) * chartW + chartW / (2 * labels.length);
-        var lbl2 = (labels[li] || '').toString();
-        if (lbl2.length > 12) lbl2 = lbl2.substr(0,11) + '…';
-        ctx.fillText(lbl2, lx, H - pad.bottom + 16);
-      }
-    },
-    _drawDoughnut: function(ctx, W, H, cfg) {
-      var data = cfg.data;
-      var vals = data.datasets[0].data, labels = data.labels || [];
-      var colors = data.datasets[0].backgroundColor || ['#8b5cf6','#06b6d4','#f43f5e','#cbd5e1'];
-      var total = 0;
-      for (var i = 0; i < vals.length; i++) total += (vals[i] || 0);
-      if (total === 0) return;
-      var cx = W * 0.42, cy = H / 2, r = Math.min(cx, cy) * 0.82, inner = r * 0.62;
-      var angle = -Math.PI / 2;
-      for (var i2 = 0; i2 < vals.length; i2++) {
-        var sweep = (vals[i2] / total) * 2 * Math.PI;
-        ctx.beginPath(); ctx.moveTo(cx, cy);
-        ctx.arc(cx, cy, r, angle, angle + sweep);
-        ctx.closePath(); ctx.fillStyle = colors[i2 % colors.length]; ctx.fill();
-        angle += sweep;
-      }
-      /* Inner hole */
-      ctx.beginPath(); ctx.arc(cx, cy, inner, 0, 2*Math.PI);
-      ctx.fillStyle = '#fff'; ctx.fill();
-      /* Legend */
-      var lx = W * 0.88, ly = cy - (labels.length * 18) / 2;
-      for (var i3 = 0; i3 < labels.length; i3++) {
-        ctx.fillStyle = colors[i3 % colors.length];
-        ctx.fillRect(lx - 52, ly + i3*20, 12, 12);
-        ctx.fillStyle = '#374151'; ctx.font = '11px Inter,sans-serif'; ctx.textAlign='left';
-        var pct = total > 0 ? Math.round((vals[i3]/total)*100) : 0;
-        ctx.fillText((labels[i3]||'') + ' ' + pct + '%', lx - 36, ly + i3*20 + 10);
-      }
-    },
-    _fmtVal: function(v) {
-      if (v >= 1000000) return '$' + (v/1000000).toFixed(1) + 'M';
-      if (v >= 1000) return '$' + (v/1000).toFixed(0) + 'K';
-      return Math.round(v).toString();
-    }
-  };
-
-  /* ===== Micro Markdown Renderer ===== */
-  var MiniMD = {
-    parse: function(md) {
-      if (!md) return '';
-      var h = md
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/^#{4}\s+(.+)$/gm,'<h4>$1</h4>')
-        .replace(/^#{3}\s+(.+)$/gm,'<h3>$1</h3>')
-        .replace(/^#{2}\s+(.+)$/gm,'<h2>$1</h2>')
-        .replace(/^#\s+(.+)$/gm,'<h1>$1</h1>')
-        .replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>')
-        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-        .replace(/\*(.+?)\*/g,'<em>$1</em>')
-        .replace(/`([^`]+)`/g,'<code>$1</code>')
-        .replace(/^[-*]\s+(.+)$/gm,'<li>$1</li>')
-        .replace(/(<li>[\s\S]*?<\/li>)/g,'<ul>$1</ul>')
-        .replace(/\|(.+)\|\n\|[-| ]+\|\n((?:\|.+\|\n?)*)/g, function(m, hdr, body) {
-          var ths = hdr.split('|').filter(function(s){return s.trim();}).map(function(s){return '<th>'+s.trim()+'</th>';}).join('');
-          var trs = body.trim().split('\n').map(function(row){
-            var tds = row.split('|').filter(function(s){return s.trim();}).map(function(s){return '<td>'+s.trim()+'</td>';}).join('');
-            return '<tr>'+tds+'</tr>';
-          }).join('');
-          return '<table style="border-collapse:collapse;width:100%;margin:8px 0"><thead><tr>'+ths+'</tr></thead><tbody>'+trs+'</tbody></table>';
-        })
-        .replace(/\n\n+/g,'</p><p>')
-        .replace(/\n/g,'<br>');
-      return '<p>' + h + '</p>';
-    }
-  };
-  </script>
   <style>
-    /* CSS Reset & Variables */
-    :root { 
-      --primary: #2563eb; --primary-hover: #1d4ed8; 
-      --bg: #f1f5f9; --surface: #ffffff; 
-      --text-main: #0f172a; --text-muted: #64748b; 
-      --border: #e2e8f0; --danger: #ef4444; --success: #10b981;
+    /* Premium Theme Variable System */
+    :root {
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+      --primary-light: #eef2ff;
+      --accent: #0ea5e9;
+      --accent-hover: #0284c7;
+      --success: #10b981;
+      --success-light: #ecfdf5;
+      --warning: #f59e0b;
+      --danger: #f43f5e;
+      --danger-light: #fef2f2;
+
+      --bg-main: #f8fafc;
+      --bg-card: #ffffff;
+      --border: #e2e8f0;
+
+      --sidebar-bg: #0f172a;
+      --sidebar-text: #f1f5f9;
+      --sidebar-muted: #64748b;
+      --sidebar-hover: #1e293b;
+
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -2px rgba(0, 0, 0, 0.08);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.08);
+      --radius: 12px;
     }
-    * { box-sizing: border-box; }
-    body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text-main); margin: 0; display: flex; height: 100vh; overflow: hidden; }
-    
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-main);
+      color: var(--text-main);
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
     /* Layout */
-    .sidebar { width: 380px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; z-index: 10; box-shadow: 4px 0 15px rgba(0,0,0,0.03); }
-    .main-content { flex: 1; padding: 32px; overflow-y: auto; display: flex; flex-direction: column; gap: 24px; }
-    
-    /* Sidebar Components */
-    .brand-header { padding: 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
-    .brand-header h1 { margin: 0; font-size: 1.25rem; font-weight: 700; color: var(--primary); }
-    .brand-header i { font-size: 1.5rem; color: var(--primary); }
-    
-    .data-ingress { padding: 24px; border-bottom: 1px solid var(--border); background: #f8fafc; }
-    .upload-btn { display: flex; justify-content: center; align-items: center; gap: 8px; background: var(--primary); color: white; padding: 12px; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.2s ease; }
-    .upload-btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
-    input[type="file"] { display: none; }
-    .status-indicator { margin-top: 12px; font-size: 0.85rem; text-align: center; font-weight: 500; color: var(--text-muted); display: flex; align-items: center; justify-content: center; gap: 6px; }
-    
-    /* Chat Interface */
-    .chat-module { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); }
-    .chat-header { padding: 16px 24px; background: var(--surface); font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid var(--border); color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .chat-stream { flex: 1; padding: 24px; overflow-y: auto; font-size: 0.95rem; display: flex; flex-direction: column; gap: 16px; }
-    
-    .msg-bubble { padding: 14px 18px; border-radius: 12px; max-width: 88%; line-height: 1.6; animation: fadeIn 0.3s ease; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-    .msg-bubble.user { background: #eff6ff; color: #1e3a8a; align-self: flex-end; border-bottom-right-radius: 2px; }
-    .msg-bubble.bot { background: #ffffff; border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 2px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
-    
-    .msg-bubble.bot p { margin: 0 0 12px 0; } .msg-bubble.bot p:last-child { margin: 0; }
-    .msg-bubble.bot table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.85rem; }
-    .msg-bubble.bot th, .msg-bubble.bot td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
-    .msg-bubble.bot th { background: #f8fafc; font-weight: 600; }
-    
-    .chat-controls { display: flex; padding: 16px; border-top: 1px solid var(--border); background: var(--surface); }
-    .chat-controls input { flex: 1; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px 0 0 8px; outline: none; transition: border 0.2s; font-family: inherit; }
-    .chat-controls input:focus { border-color: var(--primary); }
-    .chat-controls button { background: var(--primary); color: white; border: none; padding: 12px 20px; border-radius: 0 8px 8px 0; cursor: pointer; transition: background 0.2s; }
-    .chat-controls button:hover { background: var(--primary-hover); }
-    .chat-controls button:disabled { background: var(--text-muted); cursor: not-allowed; }
+    .sidebar {
+      width: 360px;
+      background: var(--sidebar-bg);
+      color: var(--sidebar-text);
+      display: flex;
+      flex-direction: column;
+      z-index: 10;
+      box-shadow: 4px 0 25px rgba(0, 0, 0, 0.15);
+    }
 
-    /* Dashboard UI */
-    .dash-header h2 { margin: 0; font-size: 1.75rem; color: var(--text-main); font-weight: 700; }
-    
-    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; }
-    .metric-card { background: var(--surface); padding: 24px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
-    .metric-icon { width: 60px; height: 60px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.75rem; }
-    .ic-blue { background: #eff6ff; color: #3b82f6; } .ic-green { background: #f0fdf4; color: #22c55e; }
-    .ic-purple { background: #faf5ff; color: #a855f7; } .ic-orange { background: #fff7ed; color: #f97316; }
-    .metric-info h3 { margin: 0; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; }
-    .metric-info p { margin: 4px 0 0 0; font-size: 1.75rem; font-weight: 700; color: var(--text-main); }
+    .main-content {
+      flex: 1;
+      padding: 32px 40px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
 
-    .visualizations-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-    .viz-card { background: var(--surface); padding: 24px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid var(--border); }
-    .viz-card h3 { margin: 0 0 20px 0; font-size: 1.1rem; color: var(--text-main); font-weight: 600; }
-    .viz-card.wide { grid-column: span 2; }
-    .canvas-wrap { position: relative; height: 320px; width: 100%; }
+    /* Sidebar Brand & Ingress */
+    .brand-header {
+      padding: 28px 24px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
 
-    /* Tabs Navigation styling */
-    .tab-nav { display: flex; border-bottom: 1px solid var(--border); gap: 24px; margin-bottom: 8px; }
-    .tab-btn { background: none; border: none; padding: 12px 4px; font-family: inherit; font-size: 0.95rem; font-weight: 500; color: var(--text-muted); cursor: pointer; position: relative; transition: all 0.2s ease; }
-    .tab-btn:hover { color: var(--text-main); }
-    .tab-btn.active { color: var(--primary); font-weight: 600; }
-    .tab-btn.active::after { content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 3px; background: var(--primary); border-radius: 3px; }
-    
-    .tab-panel { display: none; animation: fadeIn 0.4s ease; }
-    .tab-panel.active { display: flex; flex-direction: column; gap: 24px; }
-    
-    /* Database View styling */
-    .table-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; background: var(--surface); padding: 16px 24px; border-radius: 12px; border: 1px solid var(--border); }
-    .search-filter-group { display: flex; gap: 12px; align-items: center; flex: 1; min-width: 300px; }
-    .search-input-wrap { position: relative; flex: 1; }
-    .search-input-wrap i { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
-    .search-input-wrap input { width: 100%; padding: 10px 16px 10px 40px; border: 1px solid var(--border); border-radius: 8px; font-family: inherit; font-size: 0.9rem; outline: none; transition: border 0.2s; }
-    .search-input-wrap input:focus { border-color: var(--primary); }
-    .filter-select { padding: 10px 16px; border: 1px solid var(--border); border-radius: 8px; font-family: inherit; font-size: 0.9rem; background: var(--surface); outline: none; cursor: pointer; color: var(--text-main); }
-    .action-btn { display: flex; align-items: center; gap: 8px; background: var(--primary); color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.9rem; transition: background 0.2s; }
-    .action-btn:hover { background: var(--primary-hover); }
-    .action-btn.secondary { background: #f1f5f9; color: var(--text-main); border: 1px solid var(--border); }
-    .action-btn.secondary:hover { background: #e2e8f0; }
-    .action-btn.danger { background: var(--danger); }
-    .action-btn.danger:hover { background: #dc2626; }
-    
-    .table-container { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.03); }
-    .hr-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-    .hr-table th { background: #f8fafc; padding: 14px 20px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; }
-    .hr-table td { padding: 16px 20px; border-bottom: 1px solid var(--border); color: var(--text-main); vertical-align: middle; }
-    .hr-table tr:last-child td { border-bottom: none; }
-    .hr-table tr:hover td { background: #f8fafc; }
-    
-    .badge { padding: 4px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 600; display: inline-block; text-transform: uppercase; }
-    .badge.active { background: #ecfdf5; color: #047857; }
-    .badge.terminated { background: #fef2f2; color: #b91c1c; }
-    .badge.dept { background: #f0fdfa; color: #0f766e; }
-    .badge.gender { background: #faf5ff; color: #7e22ce; }
-    
-    .row-actions { display: flex; gap: 8px; }
-    .icon-btn { background: none; border: none; width: 32px; height: 32px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--text-muted); transition: all 0.2s; }
-    .icon-btn:hover { background: #f1f5f9; color: var(--text-main); }
-    .icon-btn.delete:hover { background: #fef2f2; color: var(--danger); }
-    
-    /* Modal Styling */
-    .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15, 23, 42, 0.4); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 100; animation: fadeIn 0.2s ease; }
-    .modal-card { background: var(--surface); border-radius: 16px; width: 100%; max-width: 480px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04); border: 1px solid var(--border); overflow: hidden; animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
-    @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-    .modal-header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-    .modal-header h3 { margin: 0; font-size: 1.15rem; font-weight: 600; color: var(--text-main); }
-    .modal-body { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
-    .form-group { display: flex; flex-direction: column; gap: 6px; }
-    .form-group label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; }
-    .form-group input, .form-group select { padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; font-family: inherit; font-size: 0.9rem; outline: none; transition: border 0.2s; }
-    .form-group input:focus, .form-group select:focus { border-color: var(--primary); }
-    .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); background: #f8fafc; display: flex; justify-content: flex-end; gap: 12px; }
-    
-    /* Insights & Simulator Tab styling */
-    .insights-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; }
-    .insight-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02); display: flex; flex-direction: column; gap: 16px; }
-    .insight-card h4 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text-main); display: flex; align-items: center; gap: 8px; }
-    .insight-card .metric { font-size: 2rem; font-weight: 700; color: var(--primary); }
-    .insight-card .description { font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; }
-    
-    .ai-report-card { grid-column: span 2; background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border: 1px solid var(--border); border-radius: 20px; padding: 28px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.03); display: flex; flex-direction: column; gap: 20px; position: relative; overflow: hidden; }
-    @media (max-width: 1024px) { .ai-report-card { grid-column: span 1; } }
-    .ai-report-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: linear-gradient(90deg, var(--primary), #a855f7, #ec4899); }
-    .ai-report-content { background: #ffffff; border: 1px solid var(--border); border-radius: 12px; padding: 20px; min-height: 200px; max-height: 400px; overflow-y: auto; font-size: 0.95rem; line-height: 1.6; }
-    .ai-report-content table { border-collapse: collapse; width: 100%; margin: 16px 0; }
-    .ai-report-content th, .ai-report-content td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; }
-    .ai-report-content th { background: #f8fafc; font-weight: 600; }
-    .ai-report-content h1, .ai-report-content h2, .ai-report-content h3 { color: var(--text-main); margin-top: 24px; margin-bottom: 12px; }
-    .ai-report-content h1:first-child, .ai-report-content h2:first-child { margin-top: 0; }
-    
+    .brand-header h1 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.35rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #a5b4fc 0%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-header i {
+      font-size: 1.5rem;
+      color: #38bdf8;
+    }
+
+    .data-ingress {
+      padding: 24px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .upload-btn {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      background: linear-gradient(135deg, var(--primary) 0%, #6366f1 100%);
+      color: white;
+      padding: 14px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.95rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: var(--shadow-sm);
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .upload-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(79, 70, 229, 0.4);
+    }
+
+    input[type="file"] {
+      display: none;
+    }
+
+    .status-indicator {
+      margin-top: 14px;
+      font-size: 0.85rem;
+      text-align: center;
+      font-weight: 600;
+      color: var(--sidebar-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    /* Interactive AI Chat module */
+    .chat-module {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.01);
+    }
+
+    .chat-header {
+      padding: 16px 24px;
+      font-weight: 600;
+      font-size: 0.8rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--sidebar-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chat-stream {
+      flex: 1;
+      padding: 24px;
+      overflow-y: auto;
+      font-size: 0.9rem;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .msg-bubble {
+      padding: 14px 16px;
+      border-radius: 12px;
+      max-width: 85%;
+      line-height: 1.5;
+      animation: bubbleFadeIn 0.3s ease;
+      font-size: 0.9rem;
+    }
+
+    @keyframes bubbleFadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .msg-bubble.user {
+      background: var(--primary);
+      color: white;
+      align-self: flex-end;
+      border-bottom-right-radius: 2px;
+    }
+
+    .msg-bubble.bot {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--sidebar-text);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      align-self: flex-start;
+      border-bottom-left-radius: 2px;
+    }
+
+    .msg-bubble.bot code {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 2px 4px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+    }
+
+    .msg-bubble.bot table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 0.8rem;
+    }
+
+    .msg-bubble.bot th,
+    .msg-bubble.bot td {
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 6px 10px;
+      text-align: left;
+    }
+
+    .msg-bubble.bot th {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .chat-controls {
+      display: flex;
+      padding: 16px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .chat-controls input {
+      flex: 1;
+      padding: 12px 14px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px 0 0 8px;
+      outline: none;
+      font-family: inherit;
+      background: rgba(255, 255, 255, 0.05);
+      color: white;
+      font-size: 0.9rem;
+      transition: all 0.2s;
+    }
+
+    .chat-controls input:focus {
+      border-color: var(--primary);
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .chat-controls button {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 12px 18px;
+      border-radius: 0 8px 8px 0;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .chat-controls button:hover {
+      background: var(--primary-hover);
+    }
+
+    .chat-controls button:disabled {
+      background: var(--sidebar-muted);
+      cursor: not-allowed;
+    }
+
+    /* Main Panel & Tabs */
+    .dash-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .dash-header h2 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.85rem;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .tab-nav {
+      display: flex;
+      background: #e2e8f0;
+      padding: 4px;
+      border-radius: 10px;
+      gap: 4px;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      padding: 8px 16px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-main);
+    }
+
+    .tab-btn.active {
+      background: var(--bg-card);
+      color: var(--primary);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .tab-panel {
+      display: none;
+      animation: tabFadeIn 0.35s ease;
+    }
+
+    .tab-panel.active {
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    @keyframes tabFadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(4px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 20px;
+    }
+
+    .metric-card {
+      background: var(--bg-card);
+      padding: 20px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      transition: transform 0.25s, box-shadow 0.25s;
+    }
+
+    .metric-card:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-md);
+    }
+
+    .metric-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+    }
+
+    .ic-indigo {
+      background: #eef2ff;
+      color: #6366f1;
+    }
+
+    .ic-teal {
+      background: #ecfeff;
+      color: #0ea5e9;
+    }
+
+    .ic-emerald {
+      background: #ecfdf5;
+      color: #10b981;
+    }
+
+    .ic-rose {
+      background: #fff1f2;
+      color: #f43f5e;
+    }
+
+    .metric-info h3 {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .metric-info p {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-top: 4px;
+    }
+
+    /* Visualizations */
+    .visualizations-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    .viz-card {
+      background: var(--bg-card);
+      padding: 24px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .viz-card h3 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-main);
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .viz-card.wide {
+      grid-column: span 2;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      width: 100%;
+      height: 270px;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Toolbar & Database Grid */
+    .table-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      background: var(--bg-card);
+      padding: 16px 20px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .search-filter-group {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex: 1;
+      min-width: 300px;
+    }
+
+    .search-input-wrap {
+      position: relative;
+      flex: 1;
+    }
+
+    .search-input-wrap i {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted);
+    }
+
+    .search-input-wrap input {
+      width: 100%;
+      padding: 10px 16px 10px 38px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+      transition: all 0.2s;
+    }
+
+    .search-input-wrap input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+    }
+
+    .filter-select {
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      background: var(--bg-card);
+      color: var(--text-main);
+      outline: none;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .filter-select:focus {
+      border-color: var(--primary);
+    }
+
+    .action-btn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      box-shadow: var(--shadow-sm);
+      transition: all 0.2s;
+    }
+
+    .action-btn:hover {
+      background: var(--primary-hover);
+    }
+
+    .action-btn.secondary {
+      background: #f1f5f9;
+      color: var(--text-main);
+      border: 1px solid var(--border);
+    }
+
+    .action-btn.secondary:hover {
+      background: #e2e8f0;
+    }
+
+    .table-container {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+    }
+
+    .hr-table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.9rem;
+    }
+
+    .hr-table th {
+      background: #f8fafc;
+      padding: 14px 20px;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      text-transform: uppercase;
+      font-size: 0.72rem;
+      letter-spacing: 0.5px;
+    }
+
+    .hr-table td {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-main);
+      vertical-align: middle;
+    }
+
+    .hr-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .hr-table tr:hover td {
+      background: #f8fafc;
+    }
+
+    /* Badges & Labels */
+    .badge {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .badge.active {
+      background: var(--success-light);
+      color: #047857;
+    }
+
+    .badge.terminated {
+      background: var(--danger-light);
+      color: #be123c;
+    }
+
+    .badge.dept {
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+
+    .badge.gender {
+      background: #faf5ff;
+      color: #7e22ce;
+    }
+
+    .icon-btn {
+      background: none;
+      border: none;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-muted);
+      transition: all 0.2s;
+    }
+
+    .icon-btn:hover {
+      background: #f1f5f9;
+      color: var(--text-main);
+    }
+
+    .icon-btn.delete:hover {
+      background: var(--danger-light);
+      color: var(--danger);
+    }
+
+    /* Insights Layout */
+    .insights-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+    }
+
+    .insight-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+    }
+
+    .insight-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      border-radius: var(--radius) 0 0 var(--radius);
+    }
+
+    .insight-card.indigo::before {
+      background: var(--primary);
+    }
+
+    .insight-card.rose::before {
+      background: var(--danger);
+    }
+
+    .insight-card.emerald::before {
+      background: var(--success);
+    }
+
+    .insight-card h4 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .insight-card .metric {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text-main);
+      margin: 4px 0;
+    }
+
+    .insight-card .description {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+
+    .ai-report-card {
+      grid-column: span 2;
+      background: linear-gradient(135deg, #ffffff 0%, #fcfdfe 100%);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    @media (max-width: 1024px) {
+      .ai-report-card {
+        grid-column: span 1;
+      }
+    }
+
+    .ai-report-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--primary), var(--accent), #c084fc);
+    }
+
+    .ai-report-content {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      min-height: 220px;
+      max-height: 380px;
+      overflow-y: auto;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
     /* Simulator Specifics */
-    .simulator-container { display: grid; grid-template-columns: 1fr 1.2fr; gap: 24px; }
-    @media (max-width: 900px) { .simulator-container { grid-template-columns: 1fr; } }
-    .simulator-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
-    .slider-group { display: flex; flex-direction: column; gap: 8px; background: #f8fafc; padding: 16px; border-radius: 12px; border: 1px solid var(--border); }
-    .slider-header { display: flex; justify-content: space-between; font-size: 0.9rem; font-weight: 600; }
-    .slider-wrap { display: flex; align-items: center; gap: 12px; }
-    .slider-wrap input[type="range"] { flex: 1; accent-color: var(--primary); cursor: pointer; height: 6px; border-radius: 3px; background: #e2e8f0; border: none; outline: none; }
-    .slider-val { width: 50px; text-align: right; font-weight: 700; color: var(--primary); }
-    
-    .impact-card { background: #0f172a; color: #ffffff; border-radius: 20px; padding: 28px; display: flex; flex-direction: column; gap: 20px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); }
-    .impact-card h3 { margin: 0; font-size: 1.25rem; font-weight: 600; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-    .impact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .impact-stat { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 16px; border-radius: 12px; display: flex; flex-direction: column; gap: 6px; }
-    .impact-stat h4 { margin: 0; font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-    .impact-stat .val { font-size: 1.5rem; font-weight: 700; }
-    .impact-stat .change { font-size: 0.8rem; font-weight: 600; display: flex; align-items: center; gap: 4px; }
-    .impact-stat .change.up { color: #f43f5e; }
-    .impact-stat .change.down { color: #10b981; }
-    .impact-stat .change.stable { color: #94a3b8; }
+    .simulator-container {
+      display: grid;
+      grid-template-columns: 1fr 1.2fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .simulator-container {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .simulator-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: #f8fafc;
+      padding: 16px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.88rem;
+      font-weight: 600;
+    }
+
+    .slider-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .slider-wrap input[type="range"] {
+      flex: 1;
+      accent-color: var(--primary);
+      cursor: pointer;
+      height: 6px;
+      border-radius: 3px;
+      background: #e2e8f0;
+    }
+
+    .slider-val {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      color: var(--primary);
+      font-size: 1.05rem;
+    }
+
+    .impact-card {
+      background: #0f172a;
+      color: #ffffff;
+      border-radius: 16px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .impact-card h3 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .impact-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .impact-stat {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 16px;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .impact-stat h4 {
+      font-size: 0.72rem;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .impact-stat .val {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.45rem;
+      font-weight: 700;
+    }
+
+    .impact-stat .change {
+      font-size: 0.8rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .impact-stat .change.up {
+      color: #f43f5e;
+    }
+
+    .impact-stat .change.down {
+      color: #10b981;
+    }
+
+    .impact-stat .change.stable {
+      color: #94a3b8;
+    }
+
+    /* Overlay Modal Dialogs */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(15, 23, 42, 0.4);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal-card {
+      background: var(--bg-card);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 460px;
+      box-shadow: var(--shadow-lg);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      animation: modalSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes modalSlideUp {
+      from {
+        transform: translateY(12px);
+        opacity: 0;
+      }
+
+      to {
+        transform: translateY(0);
+        opacity: 1;
+      }
+    }
+
+    .modal-header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .modal-body {
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .form-group label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    .form-group input,
+    .form-group select {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+    }
+
+    .form-group input:focus,
+    .form-group select:focus {
+      border-color: var(--primary);
+    }
+
+    .modal-footer {
+      padding: 16px 24px;
+      border-top: 1px solid var(--border);
+      background: #f8fafc;
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+    }
   </style>
 </head>
+
 <body>
 
-  <!-- Left Sidebar -->
+  <!-- Left Sidebar (Brand + Ingest + AI Analyst) -->
   <aside class="sidebar">
     <div class="brand-header">
-      <i class="fa-solid fa-layer-group"></i>
-      <h1>HR Data Matrix</h1>
+      <i class="fa-solid fa-square-poll-vertical"></i>
+      <h1>HR Ecosystem</h1>
     </div>
 
     <div class="data-ingress">
       <label for="fileUpload" class="upload-btn">
         <i class="fa-solid fa-cloud-arrow-up"></i> Ingest Dataset (CSV / XLSX)
       </label>
-      <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls" onchange="AppController.handleFileUpload(event)">
-      <div id="statusMessage" class="status-indicator">Awaiting Data...</div>
-      
-      <!-- SQLite Table Selection Container (Hidden by default) -->
-      <div id="tableSelectorContainer" style="display: none; margin-top: 12px; flex-direction: column; gap: 6px;">
-        <label for="tableSelect" style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-align: left; margin: 0;">SELECT DATABASE TABLE</label>
-        <select id="tableSelect" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-family: inherit; font-size: 0.9rem; background: var(--surface); color: var(--text-main); outline: none; transition: border 0.2s;" onchange="AppController.handleTableSelect(event)">
-        </select>
-      </div>
+      <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls">
+      <div id="statusMessage" class="status-indicator"><i class="fa-solid fa-hourglass-start"></i> Awaiting Data
+        Ingestion...</div>
     </div>
 
     <div class="chat-module">
-      <div class="chat-header"><i class="fa-solid fa-microchip"></i> AI Analyst Ready</div>
+      <div class="chat-header"><i class="fa-solid fa-robot"></i> Interactive AI Analyst</div>
       <div class="chat-stream" id="chatHistory">
-        <div class="msg-bubble bot">System initialized. Please ingest a dataset to begin multidimensional analysis.</div>
+        <div class="msg-bubble bot">Hello! I am your HR Analyst. Ingest a workforce dataset to begin exploring
+          organizational data, compensation curves, and structural recommendations.</div>
       </div>
       <div class="chat-controls">
-        <input type="text" id="chatInput" placeholder="Query the dataset..." onkeypress="if(event.key === 'Enter') AppController.submitQuery()">
-        <button id="sendBtn" onclick="AppController.submitQuery()"><i class="fa-solid fa-paper-plane"></i></button>
+        <input type="text" id="chatInput" placeholder="Query the dataset...">
+        <button id="sendBtn" disabled><i class="fa-solid fa-paper-plane"></i></button>
       </div>
     </div>
   </aside>
 
-  <!-- Main Content Panel with Tabs -->
+  <!-- Main Workspace Panels -->
   <main class="main-content">
-    <header class="dash-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 0;">
-      <h2 style="margin: 0;">Workforce Intelligence</h2>
-      <nav class="tab-nav" style="border-bottom: none; margin-bottom: 0;">
-        <button class="tab-btn active" onclick="AppController.switchTab('dashboard')"><i class="fa-solid fa-chart-line"></i> Dashboard</button>
-        <button class="tab-btn" onclick="AppController.switchTab('directory')"><i class="fa-solid fa-folder-open"></i> Database</button>
-        <button class="tab-btn" onclick="AppController.switchTab('insights')"><i class="fa-solid fa-brain"></i> Insights</button>
-        <button class="tab-btn" onclick="AppController.switchTab('simulator')"><i class="fa-solid fa-sliders"></i> Simulator</button>
+    <header class="dash-header">
+      <h2>Workforce Intelligence</h2>
+      <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="dashboard"><i class="fa-solid fa-chart-pie"></i> Dashboard</button>
+        <button class="tab-btn" data-tab="directory"><i class="fa-solid fa-users"></i> Directory</button>
+        <button class="tab-btn" data-tab="insights"><i class="fa-solid fa-lightbulb"></i> Insights</button>
+        <button class="tab-btn" data-tab="simulator"><i class="fa-solid fa-compass"></i> Simulator</button>
       </nav>
     </header>
-    <hr style="border: none; border-top: 1px solid var(--border); margin: 0 0 8px 0;">
 
-    <!-- Tab 1: Dashboard -->
+    <hr style="border: none; border-top: 1px solid var(--border);">
+
+    <!-- Dashboard Panel -->
     <div id="tab-dashboard" class="tab-panel active">
       <section class="metrics-grid">
         <article class="metric-card">
-          <div class="metric-icon ic-blue"><i class="fa-solid fa-users-viewfinder"></i></div>
-          <div class="metric-info"><h3>Active Headcount</h3><p id="kpi-headcount">-</p></div>
+          <div class="metric-icon ic-indigo"><i class="fa-solid fa-id-badge"></i></div>
+          <div class="metric-info">
+            <h3>Active Headcount</h3>
+            <p id="kpi-headcount">-</p>
+          </div>
         </article>
         <article class="metric-card">
-          <div class="metric-icon ic-green"><i class="fa-solid fa-sack-dollar"></i></div>
-          <div class="metric-info"><h3>Avg Compensation</h3><p id="kpi-salary">-</p></div>
+          <div class="metric-icon ic-teal"><i class="fa-solid fa-coins"></i></div>
+          <div class="metric-info">
+            <h3>Avg Compensation</h3>
+            <p id="kpi-salary">-</p>
+          </div>
         </article>
         <article class="metric-card">
-          <div class="metric-icon ic-purple"><i class="fa-solid fa-sitemap"></i></div>
-          <div class="metric-info"><h3>Departments</h3><p id="kpi-depts">-</p></div>
+          <div class="metric-icon ic-emerald"><i class="fa-solid fa-network-wired"></i></div>
+          <div class="metric-info">
+            <h3>Departments</h3>
+            <p id="kpi-depts">-</p>
+          </div>
         </article>
         <article class="metric-card">
-          <div class="metric-icon ic-orange"><i class="fa-solid fa-person-walking-arrow-right"></i></div>
-          <div class="metric-info"><h3>Attrition Rate</h3><p id="kpi-turnover">-</p></div>
+          <div class="metric-icon ic-rose"><i class="fa-solid fa-door-open"></i></div>
+          <div class="metric-info">
+            <h3>Attrition Rate</h3>
+            <p id="kpi-turnover">-</p>
+          </div>
         </article>
       </section>
 
       <section class="visualizations-grid">
         <article class="viz-card">
-          <h3>Distribution by Department</h3>
+          <h3><i class="fa-solid fa-chart-simple" style="color: var(--primary);"></i> Headcount by Department</h3>
           <div class="canvas-wrap"><canvas id="deptChart"></canvas></div>
         </article>
         <article class="viz-card">
-          <h3>Gender Diversity</h3>
+          <h3><i class="fa-solid fa-venus-mars" style="color: var(--accent);"></i> Gender Balance</h3>
           <div class="canvas-wrap"><canvas id="genderChart"></canvas></div>
         </article>
         <article class="viz-card wide">
-          <h3>Compensation Curve Analysis</h3>
-          <div class="canvas-wrap" style="height: 350px;"><canvas id="salaryChart"></canvas></div>
+          <h3><i class="fa-solid fa-chart-line" style="color: var(--success);"></i> Compensation Curve by Department
+          </h3>
+          <div class="canvas-wrap" style="height: 320px;"><canvas id="salaryChart"></canvas></div>
         </article>
       </section>
     </div>
 
-    <!-- Tab 2: Employee Database Directory -->
+    <!-- Directory Panel -->
     <div id="tab-directory" class="tab-panel">
       <section class="table-toolbar">
         <div class="search-filter-group">
           <div class="search-input-wrap">
             <i class="fa-solid fa-magnifying-glass"></i>
-            <input type="text" id="dbSearch" placeholder="Search by Employee ID..." oninput="AppController.renderDirectory()">
+            <input type="text" id="dbSearch" placeholder="Search by Employee ID...">
           </div>
-          <select id="dbDeptFilter" class="filter-select" onchange="AppController.renderDirectory()">
+          <select id="dbDeptFilter" class="filter-select">
             <option value="">All Departments</option>
           </select>
-          <select id="dbStatusFilter" class="filter-select" onchange="AppController.renderDirectory()">
+          <select id="dbStatusFilter" class="filter-select">
             <option value="">All Statuses</option>
             <option value="Active">Active</option>
             <option value="Terminated">Terminated</option>
           </select>
         </div>
-        <button class="action-btn" onclick="AppController.openAddModal()"><i class="fa-solid fa-user-plus"></i> Add Employee</button>
+        <button id="btnAddEmployee" class="action-btn" disabled><i class="fa-solid fa-plus"></i> Add Employee</button>
       </section>
 
       <section class="table-container" style="overflow-x: auto;">
@@ -558,94 +1122,104 @@
               <th>Employee ID</th>
               <th>Department</th>
               <th>Gender</th>
-              <th>Salary</th>
+              <th>Annual Salary</th>
               <th>Status</th>
               <th style="text-align: right;">Actions</th>
             </tr>
           </thead>
           <tbody id="directoryTableBody">
             <tr>
-              <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">No dataset loaded. Ingest data to view directory.</td>
+              <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 48px 0;">No active records
+                loaded. Ingest data above to inspect directory.</td>
             </tr>
           </tbody>
         </table>
       </section>
     </div>
 
-    <!-- Tab 3: Insights Hub -->
+    <!-- Insights Panel -->
     <div id="tab-insights" class="tab-panel">
       <section class="insights-grid">
-        <div class="insight-card">
-          <h4><i class="fa-solid fa-scale-unbalanced-stroke" style="color: var(--danger);"></i> Gender Pay Gap</h4>
+        <div class="insight-card rose">
+          <h4><i class="fa-solid fa-scale-unbalanced-stroke"></i> Gender Pay Disparity</h4>
           <div id="insightPayGap" class="metric">-</div>
-          <div class="description">Calculated as the percentage difference between the average active male salary and average active female salary. Positive indicates males are paid more.</div>
+          <div class="description">Difference in average salary between male and female active staff. High delta
+            warrants equity adjustment simulations.</div>
         </div>
-        <div class="insight-card">
-          <h4><i class="fa-solid fa-triangle-exclamation" style="color: #f97316;"></i> Attrition Hotspot</h4>
-          <div id="insightAttritionHotspot" class="metric" style="font-size: 1.5rem; word-break: break-all;">-</div>
-          <div id="insightAttritionHotspotSub" class="description">Department with highest percentage of terminated staff.</div>
+        <div class="insight-card indigo">
+          <h4><i class="fa-solid fa-triangle-exclamation"></i> Attrition Hotspot</h4>
+          <div id="insightAttritionHotspot" class="metric" style="font-size: 1.45rem; word-break: break-all;">-</div>
+          <div class="description">Department experiencing highest termination rates. Consider retention analysis.</div>
         </div>
-        <div class="insight-card">
-          <h4><i class="fa-solid fa-chart-line-up" style="color: var(--success);"></i> Highest Compensation</h4>
-          <div id="insightHighestDept" class="metric" style="font-size: 1.5rem; word-break: break-all;">-</div>
-          <div id="insightHighestDeptSub" class="description">Department with the highest average salary.</div>
+        <div class="insight-card emerald">
+          <h4><i class="fa-solid fa-chart-line-up"></i> Top Payroll Division</h4>
+          <div id="insightHighestDept" class="metric" style="font-size: 1.45rem; word-break: break-all;">-</div>
+          <div class="description">Department matching highest absolute salary average.</div>
         </div>
-        
-        <div class="viz-card" style="height: 350px;">
-          <h3>Compensation by Gender & Dept</h3>
-          <div class="canvas-wrap" style="height: 270px;"><canvas id="genderPayGapChart"></canvas></div>
+
+        <div class="viz-card">
+          <h3><i class="fa-solid fa-scale-balanced" style="color: var(--primary);"></i> Base Compensation Pay Gap</h3>
+          <div class="canvas-wrap" style="height: 250px;"><canvas id="genderPayGapChart"></canvas></div>
         </div>
-        
+
         <div class="ai-report-card">
           <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
             <div>
-              <h3 style="margin: 0; color: var(--text-main); font-weight: 700; font-size: 1.25rem;"><i class="fa-solid fa-wand-magic-sparkles" style="color: #a855f7;"></i> Generative Executive HR Report</h3>
-              <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.85rem;">Instantly compile a strategic report on pay equity, attrition indicators, and org structure from Gemini.</p>
+              <h3 style="margin: 0; color: var(--text-main); font-weight: 700; font-size: 1.25rem;"><i
+                  class="fa-solid fa-wand-magic-sparkles" style="color: #6366f1;"></i> Strategic Executive Brief</h3>
+              <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.85rem;">Synthesizes current database
+                trends into an objective report via Gemini.</p>
             </div>
-            <button id="aiReportBtn" class="action-btn" onclick="AppController.generateAiReport()" style="background: linear-gradient(135deg, var(--primary) 0%, #a855f7 100%);"><i class="fa-solid fa-bolt"></i> Generate Report</button>
+            <button id="aiReportBtn" class="action-btn"
+              style="background: linear-gradient(135deg, var(--primary) 0%, #6366f1 100%);" disabled><i
+                class="fa-solid fa-bolt"></i> Generate Executive Brief</button>
           </div>
           <div id="aiReportContent" class="ai-report-content">
             <div style="text-align: center; color: var(--text-muted); padding: 40px 0;">
-              <i class="fa-solid fa-file-invoice" style="font-size: 2.5rem; opacity: 0.3; margin-bottom: 12px;"></i>
-              <p>Awaiting report compilation. Click the button above to generate.</p>
+              <i class="fa-solid fa-file-shield" style="font-size: 2.2rem; opacity: 0.25; margin-bottom: 12px;"></i>
+              <p>Brief is currently uncompiled. Click "Generate Executive Brief" above.</p>
             </div>
           </div>
         </div>
       </section>
     </div>
 
-    <!-- Tab 4: Org Simulator -->
+    <!-- Simulator Panel -->
     <div id="tab-simulator" class="tab-panel">
       <div class="simulator-container">
         <section class="simulator-panel">
-          <h3 style="margin: 0 0 8px 0; font-weight: 700; color: var(--text-main);">Compensation Simulation</h3>
-          <p style="margin: 0 0 16px 0; color: var(--text-muted); font-size: 0.85rem; line-height: 1.4;">Select a department and simulate the impact of salary adjustments across all active employees in that group.</p>
-          
+          <h3 style="font-weight: 700; color: var(--text-main);"><i class="fa-solid fa-sliders"
+              style="color: var(--primary);"></i> Payroll Simulator</h3>
+          <p style="color: var(--text-muted); font-size: 0.85rem; line-height: 1.5;">Apply hypothetical adjustments to
+            see impacts on global metrics before committing modifications.</p>
+
           <div class="form-group">
             <label for="simDept">Target Department</label>
-            <select id="simDept" class="filter-select" style="width: 100%;" onchange="AppController.calculateSimulationImpact()">
+            <select id="simDept" class="filter-select" style="width: 100%;" disabled>
               <option value="" disabled selected>-- Select Department --</option>
             </select>
           </div>
-          
+
           <div class="slider-group">
             <div class="slider-header">
-              <span>Salary Adjustment</span>
+              <span>Adjustment rate</span>
               <span id="simSliderVal" class="slider-val">+0%</span>
             </div>
             <div class="slider-wrap">
-              <input type="range" id="simSalarySlider" min="-25" max="25" value="0" oninput="AppController.updateSimSliderLabel(this.value)">
+              <input type="range" id="simSalarySlider" min="-20" max="20" value="0" disabled>
             </div>
           </div>
-          
+
           <div style="display: flex; gap: 12px; margin-top: 8px;">
-            <button class="action-btn" style="flex: 1;" onclick="AppController.applySimulation()"><i class="fa-solid fa-circle-check"></i> Commit Changes</button>
-            <button class="action-btn secondary" onclick="AppController.calculateSimulationImpact()"><i class="fa-solid fa-rotate"></i> Reset</button>
+            <button id="btnCommitSim" class="action-btn" style="flex: 1;" disabled><i
+                class="fa-solid fa-circle-check"></i> Commit Adjustment</button>
+            <button id="btnResetSim" class="action-btn secondary" disabled><i class="fa-solid fa-rotate-left"></i>
+              Reset</button>
           </div>
         </section>
-        
+
         <section class="impact-card">
-          <h3><i class="fa-solid fa-receipt"></i> Projected Live Impact</h3>
+          <h3><i class="fa-solid fa-chart-line"></i> Projected Change Summary</h3>
           <div class="impact-grid">
             <div class="impact-stat">
               <h4>Active Payroll</h4>
@@ -653,7 +1227,7 @@
               <div id="simPayrollChange" class="change stable">No Change</div>
             </div>
             <div class="impact-stat">
-              <h4>Average Salary</h4>
+              <h4>Average salary</h4>
               <div id="simSalaryVal" class="val">-</div>
               <div id="simSalaryChange" class="change stable">No Change</div>
             </div>
@@ -673,26 +1247,26 @@
     </div>
   </main>
 
-  <!-- CRUD Dialog Modal -->
+  <!-- Add/Edit Modal Panel -->
   <div id="employeeModal" class="modal-overlay">
     <div class="modal-card">
       <div class="modal-header">
-        <h3 id="modalTitle">Add Employee</h3>
-        <button class="icon-btn" onclick="AppController.closeModal()"><i class="fa-solid fa-xmark"></i></button>
+        <h3 id="modalTitle">Record Employee</h3>
+        <button id="btnCloseModal" class="icon-btn"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="modal-body">
         <input type="hidden" id="editOriginalId">
         <div class="form-group">
           <label for="empId">Employee ID</label>
-          <input type="text" id="empId" placeholder="e.g. EMP001">
+          <input type="text" id="empId" placeholder="e.g. EMP102">
         </div>
         <div class="form-group">
           <label for="empDept">Department</label>
-          <input type="text" id="empDept" placeholder="e.g. Sales, Engineering">
+          <input type="text" id="empDept" placeholder="e.g. Sales, Development">
         </div>
         <div class="form-group">
           <label for="empGender">Gender</label>
-          <select id="empGender">
+          <select id="empGender" class="filter-select">
             <option value="Male">Male</option>
             <option value="Female">Female</option>
             <option value="Not Specified">Not Specified</option>
@@ -700,157 +1274,451 @@
         </div>
         <div class="form-group">
           <label for="empSalary">Salary ($)</label>
-          <input type="number" id="empSalary" placeholder="e.g. 75000">
+          <input type="number" id="empSalary" placeholder="e.g. 80000">
         </div>
         <div class="form-group">
-          <label for="empStatus">Status</label>
-          <select id="empStatus">
+          <label for="empStatus">Employment Status</label>
+          <select id="empStatus" class="filter-select">
             <option value="Active">Active</option>
             <option value="Terminated">Terminated</option>
           </select>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="action-btn secondary" onclick="AppController.closeModal()">Cancel</button>
-        <button class="action-btn" onclick="AppController.saveEmployee()">Save Record</button>
+        <button id="btnCancelModal" class="action-btn secondary">Cancel</button>
+        <button id="btnSaveEmployee" class="action-btn">Save Record</button>
       </div>
     </div>
   </div>
 
   <script>
-    // Surface any unhandled JS errors in the status bar
-    window.onerror = function(msg, src, line, col, err) {
-      const el = document.getElementById('statusMessage');
-      if (el) {
-        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> JS Error (L${line}): ${msg}`;
-        el.style.color = '#ef4444';
+    /* ===== Micro CSV Parser (ES5) ===== */
+    var MiniCSV = {
+      parse: function (text) {
+        var rows = [], cur = [], field = '', inQ = false, i, c, nc;
+        for (i = 0; i < text.length; i++) {
+          c = text[i]; nc = text[i + 1];
+          if (inQ) {
+            if (c === '"' && nc === '"') { field += '"'; i++; }
+            else if (c === '"') { inQ = false; }
+            else { field += c; }
+          } else {
+            if (c === '"') { inQ = true; }
+            else if (c === ',') { cur.push(field); field = ''; }
+            else if (c === '\n' || (c === '\r' && nc === '\n')) {
+              cur.push(field); field = '';
+              if (c === '\r') i++;
+              rows.push(cur); cur = [];
+            } else if (c === '\r') { cur.push(field); field = ''; rows.push(cur); cur = []; }
+            else { field += c; }
+          }
+        }
+        cur.push(field); if (cur.length > 1 || cur[0] !== '') rows.push(cur);
+        if (rows.length < 2) return [];
+        var headers = rows[0], out = [];
+        for (var r = 1; r < rows.length; r++) {
+          if (rows[r].length === 0 || (rows[r].length === 1 && rows[r][0] === '')) continue;
+          var obj = {};
+          for (var h = 0; h < headers.length; h++) obj[headers[h]] = (rows[r][h] || '').trim();
+          out.push(obj);
+        }
+        return out;
       }
-      console.error('AppController crash:', msg, 'at', src, line, col, err);
+    };
+
+    /* ===== Micro XLSX Parser (ES5) ===== */
+    var MiniXLSX = {
+      parse: function (arrayBuffer, callback) {
+        try {
+          var data = new Uint8Array(arrayBuffer);
+          var files = {}, i = 0;
+          while (i < data.length - 4) {
+            if (data[i] === 0x50 && data[i + 1] === 0x4B && data[i + 2] === 0x03 && data[i + 3] === 0x04) {
+              var comp = data[i + 8] | (data[i + 9] << 8);
+              var csize = data[i + 18] | (data[i + 19] << 8) | (data[i + 20] << 16) | (data[i + 21] << 24);
+              var fnLen = data[i + 26] | (data[i + 27] << 8);
+              var extLen = data[i + 28] | (data[i + 29] << 8);
+              var fnStart = i + 30;
+              var fn = String.fromCharCode.apply(null, data.subarray(fnStart, fnStart + fnLen));
+              var dStart = fnStart + fnLen + extLen;
+              var raw = data.subarray(dStart, dStart + csize);
+              if (comp === 0) {
+                files[fn] = raw;
+              } else if (comp === 8) {
+                try { files[fn] = raw; } catch (e) { }
+              }
+              i = dStart + csize;
+            } else { i++; }
+          }
+          var sheetXml = null;
+          var sheetKeys = Object.keys(files);
+          for (var k = 0; k < sheetKeys.length; k++) {
+            if (/xl\/worksheets\/sheet1/.test(sheetKeys[k])) {
+              sheetXml = MiniXLSX._u8ToString(files[sheetKeys[k]]); break;
+            }
+          }
+          var sst = [];
+          for (var sk = 0; sk < sheetKeys.length; sk++) {
+            if (/sharedStrings/.test(sheetKeys[sk])) {
+              var sstXml = MiniXLSX._u8ToString(files[sheetKeys[sk]]);
+              var siRe = /<si>([\s\S]*?)<\/si>/g, siM;
+              while ((siM = siRe.exec(sstXml)) !== null) {
+                var tAll = '', tRe = /<t[^>]*>([^<]*)<\/t>/g, tM;
+                while ((tM = tRe.exec(siM[1])) !== null) tAll += tM[1];
+                sst.push(tAll.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"'));
+              }
+              break;
+            }
+          }
+          if (!sheetXml) { callback([]); return; }
+          var rows = [], rowRe = /<row[^>]*>([\s\S]*?)<\/row>/g, rowM;
+          while ((rowM = rowRe.exec(sheetXml)) !== null) {
+            var cells = [], cellRe = /<c r="([A-Z]+)(\d+)"([^>]*)>([\s\S]*?)<\/c>/g, cM;
+            while ((cM = cellRe.exec(rowM[1])) !== null) {
+              var col = MiniXLSX._colIdx(cM[1]);
+              var attr = cM[3], inner = cM[4];
+              var vM = /<v>([^<]*)<\/v>/.exec(inner);
+              var val = vM ? vM[1] : '';
+              if (/t="s"/.test(attr)) val = sst[parseInt(val, 10)] || '';
+              while (cells.length < col) cells.push('');
+              cells[col] = val;
+            }
+            rows.push(cells);
+          }
+          if (rows.length < 2) { callback([]); return; }
+          var headers = rows[0], out = [];
+          for (var r = 1; r < rows.length; r++) {
+            var isEmpty = true;
+            for (var ci = 0; ci < rows[r].length; ci++) { if (rows[r][ci]) { isEmpty = false; break; } }
+            if (isEmpty) continue;
+            var obj = {};
+            for (var h = 0; h < headers.length; h++) obj[headers[h] || 'Col' + h] = (rows[r][h] || '').toString().trim();
+            out.push(obj);
+          }
+          callback(out);
+        } catch (e) { console.error('XLSX parse error:', e); callback([]); }
+      },
+      _u8ToString: function (u8) {
+        var out = '', chunk = 8192;
+        for (var i = 0; i < u8.length; i += chunk) {
+          out += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+        }
+        return decodeURIComponent(escape(out));
+      },
+      _colIdx: function (letters) {
+        var n = 0;
+        for (var i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+        return n - 1;
+      }
+    };
+
+    /* ===== Premium Canvas Chart Engine (ES5) ===== */
+    var MiniChart = {
+      _instances: {},
+      create: function (canvasId, config) {
+        var canvas = document.getElementById(canvasId);
+        if (!canvas) return null;
+        if (MiniChart._instances[canvasId]) {
+          MiniChart._instances[canvasId] = null;
+        }
+        var inst = { canvas: canvas, config: config };
+        MiniChart._instances[canvasId] = inst;
+        MiniChart._draw(inst);
+        return {
+          destroy: function () {
+            MiniChart._instances[canvasId] = null;
+            var ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+        };
+      },
+      _draw: function (inst) {
+        var canvas = inst.canvas, cfg = inst.config;
+        var ctx = canvas.getContext('2d');
+        canvas.width = canvas.clientWidth || 300;
+        canvas.height = canvas.clientHeight || 200;
+        var W = canvas.width, H = canvas.height;
+        ctx.clearRect(0, 0, W, H);
+
+        if (cfg.type === 'bar') {
+          MiniChart._drawBar(ctx, W, H, cfg);
+        } else if (cfg.type === 'horizontalBar') {
+          MiniChart._drawHorizontalBar(ctx, W, H, cfg);
+        } else if (cfg.type === 'line') {
+          MiniChart._drawLine(ctx, W, H, cfg);
+        } else if (cfg.type === 'doughnut') {
+          MiniChart._drawDoughnut(ctx, W, H, cfg);
+        }
+      },
+      _roundRect: function (ctx, x, y, width, height, radius) {
+        if (width < 2 * radius) radius = width / 2;
+        if (height < 2 * radius) radius = height / 2;
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + width, y, x + width, y + height, radius);
+        ctx.arcTo(x + width, y + height, x, y + height, radius);
+        ctx.arcTo(x, y + height, x, y, radius);
+        ctx.arcTo(x, y, x + width, y, radius);
+        ctx.closePath();
+      },
+      _drawBar: function (ctx, W, H, cfg) {
+        var pad = { top: 25, right: 15, bottom: 40, left: 60 };
+        var data = cfg.data, labels = data.labels || [];
+        var allVals = [];
+        for (var di = 0; di < data.datasets.length; di++) {
+          var ds = data.datasets[di];
+          for (var vi = 0; vi < ds.data.length; vi++) allVals.push(ds.data[vi] || 0);
+        }
+        var maxVal = Math.max.apply(null, allVals) || 1;
+        var chartW = W - pad.left - pad.right;
+        var chartH = H - pad.top - pad.bottom;
+
+        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+        var gridLines = 5;
+        for (var g = 0; g <= gridLines; g++) {
+          var y = pad.top + chartH - (g / gridLines) * chartH;
+          ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + chartW, y); ctx.stroke();
+
+          var lbl = MiniChart._fmtVal(maxVal * g / gridLines);
+          ctx.fillStyle = '#94a3b8'; ctx.font = '10px Inter,sans-serif'; ctx.textAlign = 'right';
+          ctx.fillText(lbl, pad.left - 8, y + 3);
+        }
+
+        var numDs = data.datasets.length;
+        var colW = chartW / Math.max(labels.length, 1);
+        var groupW = colW * 0.7;
+        var barW = groupW / numDs;
+        var colors = ['#4f46e5', '#ec4899', '#10b981'];
+
+        for (var li = 0; li < labels.length; li++) {
+          var colX = pad.left + li * colW + (colW - groupW) / 2;
+          for (var di2 = 0; di2 < numDs; di2++) {
+            var val = data.datasets[di2].data[li] || 0;
+            var barH = (val / maxVal) * chartH;
+            var bx = colX + di2 * barW;
+            var by = pad.top + chartH - barH;
+
+            ctx.fillStyle = data.datasets[di2].backgroundColor || colors[di2 % colors.length];
+            MiniChart._roundRect(ctx, bx, by, barW - 2, barH, 4);
+            ctx.fill();
+          }
+
+          ctx.fillStyle = '#64748b'; ctx.font = '10px Inter,sans-serif'; ctx.textAlign = 'center';
+          var lblText = (labels[li] || '').toString();
+          if (lblText.length > 10) lblText = lblText.substr(0, 8) + '..';
+          ctx.fillText(lblText, pad.left + li * colW + colW / 2, pad.top + chartH + 16);
+        }
+      },
+      _drawHorizontalBar: function (ctx, W, H, cfg) {
+        var pad = { top: 15, right: 30, bottom: 35, left: 105 };
+        var data = cfg.data, labels = data.labels || [];
+        var vals = data.datasets[0].data || [];
+        var maxVal = Math.max.apply(null, vals) || 1;
+        var chartW = W - pad.left - pad.right;
+        var chartH = H - pad.top - pad.bottom;
+
+        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+        var gridLines = 4;
+        for (var g = 0; g <= gridLines; g++) {
+          var x = pad.left + (g / gridLines) * chartW;
+          ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + chartH); ctx.stroke();
+
+          var lbl = Math.round(maxVal * g / gridLines).toString();
+          ctx.fillStyle = '#94a3b8'; ctx.font = '10px Inter,sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(lbl, x, pad.top + chartH + 14);
+        }
+
+        var numLabels = labels.length;
+        var rowH = chartH / Math.max(numLabels, 1);
+        var barH = Math.max(8, Math.min(rowH - 8, 24));
+        var colors = ['#4f46e5', '#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6'];
+
+        for (var li = 0; li < numLabels; li++) {
+          var val = vals[li] || 0;
+          var barW = (val / maxVal) * chartW;
+          var y = pad.top + li * rowH + (rowH - barH) / 2;
+
+          ctx.fillStyle = data.datasets[0].backgroundColor || colors[li % colors.length];
+          MiniChart._roundRect(ctx, pad.left, y, barW, barH, 4);
+          ctx.fill();
+
+          ctx.fillStyle = '#334155'; ctx.font = '500 10px Inter,sans-serif'; ctx.textAlign = 'right';
+          var lblText = (labels[li] || '').toString();
+          if (lblText.length > 16) lblText = lblText.substr(0, 14) + '..';
+          ctx.fillText(lblText, pad.left - 8, y + barH / 2 + 3);
+        }
+      },
+      _drawLine: function (ctx, W, H, cfg) {
+        var pad = { top: 25, right: 20, bottom: 40, left: 60 };
+        var data = cfg.data, labels = data.labels || [];
+        var vals = data.datasets[0].data || [];
+        var maxVal = Math.max.apply(null, vals) || 1;
+        var chartW = W - pad.left - pad.right;
+        var chartH = H - pad.top - pad.bottom;
+
+        ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+        var gridLines = 5;
+        for (var g = 0; g <= gridLines; g++) {
+          var y = pad.top + chartH - (g / gridLines) * chartH;
+          ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + chartW, y); ctx.stroke();
+
+          var lbl = MiniChart._fmtVal(maxVal * g / gridLines);
+          ctx.fillStyle = '#94a3b8'; ctx.font = '10px Inter,sans-serif'; ctx.textAlign = 'right';
+          ctx.fillText(lbl, pad.left - 8, y + 3);
+        }
+
+        var numLabels = labels.length;
+        var colW = chartW / Math.max(numLabels - 1, 1);
+        var points = [];
+
+        ctx.strokeStyle = cfg.data.datasets[0].borderColor || '#10b981';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for (var li = 0; li < numLabels; li++) {
+          var val = vals[li] || 0;
+          var x = pad.left + li * colW;
+          var y = pad.top + chartH - (val / maxVal) * chartH;
+          points.push({ x: x, y: y });
+          if (li === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        if (points.length > 0) {
+          ctx.fillStyle = cfg.data.datasets[0].backgroundColor || 'rgba(16,185,129,0.06)';
+          ctx.beginPath();
+          ctx.moveTo(points[0].x, pad.top + chartH);
+          for (var p = 0; p < points.length; p++) {
+            ctx.lineTo(points[p].x, points[p].y);
+          }
+          ctx.lineTo(points[points.length - 1].x, pad.top + chartH);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        ctx.fillStyle = cfg.data.datasets[0].borderColor || '#10b981';
+        for (var p2 = 0; p2 < points.length; p2++) {
+          ctx.beginPath(); ctx.arc(points[p2].x, points[p2].y, 4, 0, 2 * Math.PI); ctx.fill();
+        }
+
+        ctx.fillStyle = '#64748b'; ctx.font = '10px Inter,sans-serif'; ctx.textAlign = 'center';
+        for (var li2 = 0; li2 < numLabels; li2++) {
+          var lx = pad.left + li2 * colW;
+          var lblText = (labels[li2] || '').toString();
+          if (lblText.length > 10) lblText = lblText.substr(0, 8) + '..';
+          ctx.fillText(lblText, lx, pad.top + chartH + 16);
+        }
+      },
+      _drawDoughnut: function (ctx, W, H, cfg) {
+        var data = cfg.data;
+        var vals = data.datasets[0].data, labels = data.labels || [];
+        var colors = data.datasets[0].backgroundColor || ['#4f46e5', '#0ea5e9', '#ec4899', '#cbd5e1'];
+        var total = 0;
+        for (var i = 0; i < vals.length; i++) total += (vals[i] || 0);
+
+        var cx = W * 0.35, cy = H / 2, r = Math.min(cx, cy) * 0.85, inner = r * 0.62;
+
+        if (total === 0) {
+          ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.fillStyle = '#e2e8f0'; ctx.fill();
+          ctx.beginPath(); ctx.arc(cx, cy, inner, 0, 2 * Math.PI); ctx.fillStyle = '#fff'; ctx.fill();
+          return;
+        }
+
+        var angle = -Math.PI / 2;
+        for (var i2 = 0; i2 < vals.length; i2++) {
+          var sweep = (vals[i2] / total) * 2 * Math.PI;
+          ctx.beginPath(); ctx.moveTo(cx, cy);
+          ctx.arc(cx, cy, r, angle, angle + sweep);
+          ctx.closePath();
+          ctx.fillStyle = colors[i2 % colors.length];
+          ctx.fill();
+          angle += sweep;
+        }
+
+        ctx.beginPath(); ctx.arc(cx, cy, inner, 0, 2 * Math.PI); ctx.fillStyle = '#fff'; ctx.fill();
+
+        var lx = W * 0.65, ly = cy - (labels.length * 20) / 2;
+        ctx.textAlign = 'left';
+        for (var i3 = 0; i3 < labels.length; i3++) {
+          var y = ly + i3 * 22;
+          ctx.fillStyle = colors[i3 % colors.length];
+          MiniChart._roundRect(ctx, lx, y, 12, 12, 3);
+          ctx.fill();
+
+          ctx.fillStyle = '#334155'; ctx.font = '500 11px Inter,sans-serif';
+          var pct = Math.round((vals[i3] / total) * 100);
+          ctx.fillText((labels[i3] || '') + ' (' + pct + '%)', lx + 20, y + 10);
+        }
+      },
+      _fmtVal: function (v) {
+        if (v >= 1000000) return '$' + (v / 1000000).toFixed(1) + 'M';
+        if (v >= 1000) return '$' + (v / 1000).toFixed(0) + 'K';
+        return Math.round(v).toString();
+      }
+    };
+
+    /* ===== Micro Markdown Renderer (ES5) ===== */
+    var MiniMD = {
+      parse: function (md) {
+        if (!md) return '';
+        var h = md
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/^#{4}\s+(.+)$/gm, '<h4>$1</h4>')
+          .replace(/^#{3}\s+(.+)$/gm, '<h3>$1</h3>')
+          .replace(/^#{2}\s+(.+)$/gm, '<h2>$1</h2>')
+          .replace(/^#\s+(.+)$/gm, '<h1>$1</h1>')
+          .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+          .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.+?)\*/g, '<em>$1</em>')
+          .replace(/`([^`]+)`/g, '<code>$1</code>')
+          .replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>')
+          .replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>')
+          .replace(/\|(.+)\|\n\|[-| ]+\|\n((?:\|.+\|\n?)*)/g, function (m, hdr, body) {
+            var ths = hdr.split('|').filter(function (s) { return s.trim(); }).map(function (s) { return '<th>' + s.trim() + '</th>'; }).join('');
+            var trs = body.trim().split('\n').map(function (row) {
+              var tds = row.split('|').filter(function (s) { return s.trim(); }).map(function (s) { return '<td>' + s.trim() + '</td>'; }).join('');
+              var styledTds = tds.replace(/<td>/g, '<td style="border:1px solid #e2e8f0;padding:6px 10px;">');
+              return '<tr>' + styledTds + '</tr>';
+            }).join('');
+            return '<table style="border-collapse:collapse;width:100%;margin:12px 0;font-size:0.85rem"><thead><tr style="background:#f8fafc">' + ths + '</tr></thead><tbody>' + trs + '</tbody></table>';
+          })
+          .replace(/\n\n+/g, '</p><p>')
+          .replace(/\n/g, '<br>');
+        return '<p>' + h + '</p>';
+      }
+    };
+  </script>
+
+  <script>
+    // Global Exception Catcher
+    window.onerror = function (msg, src, line, col, err) {
+      var el = document.getElementById('statusMessage');
+      if (el) {
+        el.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> JS Runtime Error (L' + line + '): ' + msg;
+        el.style.color = '#f43f5e';
+      }
+      console.error('AppController execution error:', msg, 'at', src, line, col, err);
       return false;
     };
 
     /**
      * Application State & Logic Controller
      */
-    window.AppController = (() => {
+    window.AppController = (function () {
       // Private State
-      let _dataset = [];
-      let _aiContextStr = "";
-      let _chartInstances = {};
-      let _sqliteDB = null;
+      var _dataset = [];
+      var _aiContextStr = "";
+      var _chartInstances = {};
 
-      // DOM Elements
-      const UI = {
-        status: document.getElementById('statusMessage'),
-        chatInput: document.getElementById('chatInput'),
-        chatHistory: document.getElementById('chatHistory'),
-        sendBtn: document.getElementById('sendBtn'),
-        tableSelectorContainer: document.getElementById('tableSelectorContainer'),
-        tableSelect: document.getElementById('tableSelect'),
-        // Tab panels and buttons
-        tabPanels: document.querySelectorAll('.tab-panel'),
-        tabButtons: document.querySelectorAll('.tab-btn'),
-        // Directory elements
-        dbSearch: document.getElementById('dbSearch'),
-        dbDeptFilter: document.getElementById('dbDeptFilter'),
-        dbStatusFilter: document.getElementById('dbStatusFilter'),
-        directoryTableBody: document.getElementById('directoryTableBody'),
-        // Insights elements
-        insightPayGap: document.getElementById('insightPayGap'),
-        insightAttritionHotspot: document.getElementById('insightAttritionHotspot'),
-        insightHighestDept: document.getElementById('insightHighestDept'),
-        aiReportContent: document.getElementById('aiReportContent'),
-        aiReportBtn: document.getElementById('aiReportBtn'),
-        // Simulator elements
-        simDept: document.getElementById('simDept'),
-        simSalarySlider: document.getElementById('simSalarySlider'),
-        simSliderVal: document.getElementById('simSliderVal'),
-        simPayrollVal: document.getElementById('simPayrollVal'),
-        simPayrollChange: document.getElementById('simPayrollChange'),
-        simSalaryVal: document.getElementById('simSalaryVal'),
-        simSalaryChange: document.getElementById('simSalaryChange'),
-        simHeadcountVal: document.getElementById('simHeadcountVal'),
-        simAttritionVal: document.getElementById('simAttritionVal'),
-        // CRUD Modal elements
-        employeeModal: document.getElementById('employeeModal'),
-        modalTitle: document.getElementById('modalTitle'),
-        editOriginalId: document.getElementById('editOriginalId'),
-        empId: document.getElementById('empId'),
-        empDept: document.getElementById('empDept'),
-        empGender: document.getElementById('empGender'),
-        empSalary: document.getElementById('empSalary'),
-        empStatus: document.getElementById('empStatus'),
-        kpis: {
-          headcount: document.getElementById('kpi-headcount'),
-          salary: document.getElementById('kpi-salary'),
-          depts: document.getElementById('kpi-depts'),
-          turnover: document.getElementById('kpi-turnover')
-        }
-      };
-
-      // Configuration — guarded in case Chart.js CDN failed to load
-      try {
-        if (typeof Chart !== 'undefined') {
-          Chart.defaults.font.family = "'Inter', sans-serif";
-          Chart.defaults.color = '#64748b';
-        } else {
-          console.warn('Chart.js not loaded — charts will be unavailable.');
-        }
-      } catch(e) {
-        console.warn('Chart config error:', e);
-      }
-
-      /**
-       * Load data from a specific SQLite table and run ETL
-       */
-      const loadTableData = (tableName) => {
-        if (!_sqliteDB) return;
-        try {
-          UI.status.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Reading ${tableName}...`;
-          UI.status.style.color = "var(--primary)";
-          
-          const result = _sqliteDB.exec(`SELECT * FROM "${tableName}";`);
-          if (result.length === 0) {
-            throw new Error(`Table "${tableName}" is empty.`);
-          }
-          
-          const columns = result[0].columns;
-          const values = result[0].values;
-          
-          const rawData = values.map(row => {
-            const obj = {};
-            columns.forEach((col, index) => {
-              obj[col] = row[index];
-            });
-            return obj;
-          });
-          
-          executeETL(rawData);
-        } catch (err) {
-          UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error: ${err.message}`;
-          UI.status.style.color = "var(--danger)";
-        }
-      };
-
-      /**
-       * Handle database table selection changes
-       */
-      const handleTableSelect = (event) => {
-        const selectedTable = event.target.value;
-        if (selectedTable) {
-          loadTableData(selectedTable);
-        }
-      };
+      // DOM Elements Object (populated in init)
+      var UI = {};
 
       /**
        * Primary Ingress Pipeline
        */
-      var handleFileUpload = function(event) {
+      var handleFileUpload = function (event) {
         var file = event.target.files[0];
         if (!file) return;
-
-        UI.tableSelectorContainer.style.display = 'none';
-        UI.tableSelect.innerHTML = '';
 
         UI.status.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Parsing Dataset...';
         UI.status.style.color = 'var(--primary)';
@@ -859,82 +1727,91 @@
 
         if (fileName.indexOf('.csv') !== -1) {
           var reader = new FileReader();
-          reader.onload = function(e) {
+          reader.onload = function (e) {
             try {
               var rows = MiniCSV.parse(e.target.result);
               executeETL(rows);
-            } catch(err) {
+            } catch (err) {
               UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> CSV Error: ' + err.message;
               UI.status.style.color = 'var(--danger)';
             }
           };
-          reader.onerror = function() {
-            UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Error reading file.';
-            UI.status.style.color = 'var(--danger)';
-          };
           reader.readAsText(file);
         } else if (fileName.indexOf('.xlsx') !== -1 || fileName.indexOf('.xls') !== -1) {
           var reader2 = new FileReader();
-          reader2.onload = function(e) {
-            MiniXLSX.parse(e.target.result, function(rows) {
-              if (rows.length === 0) {
-                UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> No data found in Excel file.';
-                UI.status.style.color = 'var(--danger)';
-              } else {
-                executeETL(rows);
-              }
-            });
-          };
-          reader2.onerror = function() {
-            UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Error reading file.';
-            UI.status.style.color = 'var(--danger)';
+          reader2.onload = function (e) {
+            try {
+              MiniXLSX.parse(e.target.result, function (rows) {
+                if (rows.length === 0) {
+                  UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> No data found in Excel workbook.';
+                  UI.status.style.color = 'var(--danger)';
+                } else {
+                  executeETL(rows);
+                }
+              });
+            } catch (err) {
+              UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Excel Error: ' + err.message;
+              UI.status.style.color = 'var(--danger)';
+            }
           };
           reader2.readAsArrayBuffer(file);
         } else {
-          UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Unsupported format. Please upload CSV or XLSX.';
+          UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Unsupported format (upload CSV/XLSX).';
           UI.status.style.color = 'var(--danger)';
         }
       };
 
       /**
-       * Transform & Cleanse Data (The 'T' in ETL)
+       * Transform & Cleanse Data (ETL)
        */
-      const executeETL = (rawArray) => {
+      var executeETL = function (rawArray) {
         if (!rawArray || rawArray.length === 0) {
-          UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> No data rows found in file.`;
-          UI.status.style.color = "var(--danger)";
+          UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> No data rows found.';
+          UI.status.style.color = 'var(--danger)';
           return;
         }
-        
-        _dataset = rawArray.map(row => {
-          // Dynamic Header Resolution — safely returns null if no match
-          const keys = Object.keys(row);
-          const findKey = (str) => keys.find(k => k.toLowerCase().includes(str.toLowerCase())) || null;
-          
-          const salaryKey = findKey('salary') || findKey('pay') || findKey('wage') || findKey('compensation');
-          const rawSalary = salaryKey ? row[salaryKey] : '0';
-          const cleanSalary = parseFloat(String(rawSalary).replace(/[^0-9.-]+/g, ""));
-          
-          const statusKey = findKey('status') || findKey('active') || findKey('employment');
-          const rawStatus = statusKey ? row[statusKey] : 'Active';
-          const isTerminated = /term|inactive|left|resigned|fired/i.test(String(rawStatus));
 
-          const idKey = findKey('id') || findKey('emp') || findKey('number') || findKey('code');
-          const deptKey = findKey('department') || findKey('dept') || findKey('team') || findKey('division');
-          const genderKey = findKey('gender') || findKey('sex');
+        _dataset = rawArray.map(function (row) {
+          var keys = Object.keys(row);
+          var findKey = function (str) {
+            return keys.find(function (k) {
+              return k.toLowerCase().replace(/[^a-z0-9]/g, '').indexOf(str.toLowerCase()) !== -1;
+            }) || null;
+          };
+
+          var salaryKey = findKey('salary') || findKey('pay') || findKey('wage') || findKey('compensation') || findKey('income') || findKey('rate');
+          var rawSalary = salaryKey ? row[salaryKey] : '0';
+          var cleanSalary = parseFloat(String(rawSalary).replace(/[^0-9.-]+/g, ""));
+
+          var statusKey = findKey('status') || findKey('active') || findKey('employment');
+          var rawStatus = statusKey ? row[statusKey] : 'Active';
+          var isTerminated = /term|inactive|left|resigned|fired/i.test(String(rawStatus));
+
+          var idKey = findKey('id') || findKey('emp') || findKey('number') || findKey('code');
+          var deptKey = findKey('department') || findKey('dept') || findKey('team') || findKey('division');
+          var genderKey = findKey('gender') || findKey('sex');
 
           return {
-            id: (idKey ? row[idKey] : null) || `EMP-${Math.random().toString(36).substr(2,6).toUpperCase()}`,
+            id: (idKey ? row[idKey] : null) || 'EMP-' + Math.random().toString(36).substr(2, 6).toUpperCase(),
             department: (deptKey ? String(row[deptKey]).trim() : '') || 'Unassigned',
             salary: isNaN(cleanSalary) ? 0 : cleanSalary,
             status: isTerminated ? 'Terminated' : 'Active',
             gender: (genderKey ? String(row[genderKey]).trim() : '') || 'Not Specified'
           };
-        }).filter(r => r !== null);
+        });
 
-        UI.status.innerHTML = `<i class="fa-solid fa-circle-check"></i> Ingested ${_dataset.length.toLocaleString()} records`;
-        UI.status.style.color = "var(--success)";
-        
+        UI.status.innerHTML = '<i class="fa-solid fa-circle-check"></i> Ingested ' + _dataset.length.toLocaleString() + ' records';
+        UI.status.style.color = 'var(--success)';
+
+        // Enable buttons & features
+        UI.btnAddEmployee.disabled = false;
+        UI.sendBtn.disabled = false;
+        UI.aiReportBtn.disabled = false;
+        UI.simDept.disabled = false;
+        UI.simSalarySlider.disabled = false;
+        UI.btnCommitSim.disabled = false;
+        UI.btnResetSim.disabled = false;
+
         syncFilters();
         updateIntelligenceDashboard();
         switchTab('dashboard');
@@ -943,23 +1820,26 @@
       /**
        * Tab Navigation Controller
        */
-      const switchTab = (tabId) => {
-        UI.tabButtons.forEach(btn => {
-          if (btn.getAttribute('onclick').includes(tabId)) {
+      var switchTab = function (tabId) {
+        UI.tabButtons.forEach(function (btn) {
+          if (btn.getAttribute('data-tab') === tabId) {
             btn.classList.add('active');
           } else {
             btn.classList.remove('active');
           }
         });
-        UI.tabPanels.forEach(panel => {
-          if (panel.id === `tab-${tabId}`) {
+        UI.tabPanels.forEach(function (panel) {
+          if (panel.id === 'tab-' + tabId) {
             panel.classList.add('active');
           } else {
             panel.classList.remove('active');
           }
         });
-        
-        if (tabId === 'directory') {
+
+        // Triggers for specific tabs
+        if (tabId === 'dashboard') {
+          updateIntelligenceDashboard();
+        } else if (tabId === 'directory') {
           renderDirectory();
         } else if (tabId === 'insights') {
           updateInsightsTab();
@@ -969,113 +1849,113 @@
       };
 
       /**
-       * In-Memory Dropdown Filter Synchronizer
+       * Synchronize Dropdowns & Filters
        */
-      const syncFilters = () => {
-        const depts = [...new Set(_dataset.map(e => e.department))].sort();
-        
-        const currentDeptVal = UI.dbDeptFilter.value;
+      var syncFilters = function () {
+        var depts = [];
+        _dataset.forEach(function (e) {
+          if (e.department && depts.indexOf(e.department) === -1) {
+            depts.push(e.department);
+          }
+        });
+        depts.sort();
+
+        var currentDeptVal = UI.dbDeptFilter.value;
         UI.dbDeptFilter.innerHTML = '<option value="">All Departments</option>';
-        depts.forEach(d => {
-          const opt = document.createElement('option');
+        depts.forEach(function (d) {
+          var opt = document.createElement('option');
           opt.value = d;
           opt.innerText = d;
           UI.dbDeptFilter.appendChild(opt);
         });
-        UI.dbDeptFilter.value = depts.includes(currentDeptVal) ? currentDeptVal : '';
-        
-        const currentSimVal = UI.simDept.value;
+        UI.dbDeptFilter.value = depts.indexOf(currentDeptVal) !== -1 ? currentDeptVal : '';
+
+        var currentSimVal = UI.simDept.value;
         UI.simDept.innerHTML = '<option value="" disabled selected>-- Select Department --</option>';
-        depts.forEach(d => {
-          const opt = document.createElement('option');
+        depts.forEach(function (d) {
+          var opt = document.createElement('option');
           opt.value = d;
           opt.innerText = d;
           UI.simDept.appendChild(opt);
         });
-        if (depts.includes(currentSimVal)) {
+        if (depts.indexOf(currentSimVal) !== -1) {
           UI.simDept.value = currentSimVal;
         }
       };
 
       /**
-       * Render Directory View Data Grid Table
+       * Render Database Directory grid
        */
-      const renderDirectory = () => {
-        const search = UI.dbSearch.value.toLowerCase().trim();
-        const dept = UI.dbDeptFilter.value;
-        const status = UI.dbStatusFilter.value;
-        
-        const filtered = _dataset.filter(emp => {
-          const matchesSearch = emp.id.toLowerCase().includes(search);
-          const matchesDept = !dept || emp.department === dept;
-          const matchesStatus = !status || emp.status === status;
+      var renderDirectory = function () {
+        var search = UI.dbSearch.value.toLowerCase().trim();
+        var dept = UI.dbDeptFilter.value;
+        var status = UI.dbStatusFilter.value;
+
+        var filtered = _dataset.filter(function (emp) {
+          var matchesSearch = emp.id.toLowerCase().indexOf(search) !== -1;
+          var matchesDept = !dept || emp.department === dept;
+          var matchesStatus = !status || emp.status === status;
           return matchesSearch && matchesDept && matchesStatus;
         });
-        
+
         UI.directoryTableBody.innerHTML = '';
-        
+
         if (filtered.length === 0) {
-          UI.directoryTableBody.innerHTML = `
-            <tr>
-              <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">No matching records found.</td>
-            </tr>
-          `;
+          UI.directoryTableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 48px 0;">No matching records found.</td></tr>';
           return;
         }
-        
-        filtered.forEach(emp => {
-          const tr = document.createElement('tr');
-          
-          const tdId = document.createElement('td');
+
+        filtered.forEach(function (emp) {
+          var tr = document.createElement('tr');
+
+          var tdId = document.createElement('td');
           tdId.style.fontWeight = '600';
           tdId.innerText = emp.id;
-          
-          const tdDept = document.createElement('td');
-          const deptBadge = document.createElement('span');
+
+          var tdDept = document.createElement('td');
+          var deptBadge = document.createElement('span');
           deptBadge.className = 'badge dept';
           deptBadge.innerText = emp.department;
           tdDept.appendChild(deptBadge);
-          
-          const tdGender = document.createElement('td');
-          const genderBadge = document.createElement('span');
+
+          var tdGender = document.createElement('td');
+          var genderBadge = document.createElement('span');
           genderBadge.className = 'badge gender';
           genderBadge.innerText = emp.gender;
           tdGender.appendChild(genderBadge);
-          
-          const tdSalary = document.createElement('td');
-          tdSalary.innerText = `$${Math.round(emp.salary).toLocaleString()}`;
-          
-          const tdStatus = document.createElement('td');
-          const statusBadge = document.createElement('span');
-          statusBadge.className = `badge ${emp.status.toLowerCase()}`;
+
+          var tdSalary = document.createElement('td');
+          tdSalary.innerText = '$' + Math.round(emp.salary).toLocaleString();
+
+          var tdStatus = document.createElement('td');
+          var statusBadge = document.createElement('span');
+          statusBadge.className = 'badge ' + emp.status.toLowerCase();
           statusBadge.innerText = emp.status;
           tdStatus.appendChild(statusBadge);
-          
-          const tdActions = document.createElement('td');
+
+          var tdActions = document.createElement('td');
           tdActions.style.textAlign = 'right';
-          tdActions.innerHTML = `
-            <div class="row-actions" style="justify-content: flex-end;">
-              <button class="icon-btn" onclick="AppController.openEditModal('${emp.id}')" title="Edit"><i class="fa-solid fa-pen-to-square"></i></button>
-              <button class="icon-btn delete" onclick="AppController.deleteEmployee('${emp.id}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
-            </div>
-          `;
-          
+          tdActions.innerHTML = '<div class="row-actions" style="justify-content: flex-end;">' +
+            '<button class="icon-btn" onclick="AppController.openEditModal(\'' + emp.id + '\')" title="Edit"><i class="fa-solid fa-pen-to-square"></i></button>' +
+            '<button class="icon-btn delete" onclick="AppController.deleteEmployee(\'' + emp.id + '\')" title="Delete"><i class="fa-solid fa-trash"></i></button>' +
+            '</div>';
+
           tr.appendChild(tdId);
           tr.appendChild(tdDept);
           tr.appendChild(tdGender);
           tr.appendChild(tdSalary);
           tr.appendChild(tdStatus);
           tr.appendChild(tdActions);
-          
+
           UI.directoryTableBody.appendChild(tr);
         });
       };
 
       /**
-       * Directory CRUD Modal Operations
+       * CRUD Modal operations
        */
-      const openAddModal = () => {
-        UI.modalTitle.innerText = "Add Employee";
+      var openAddModal = function () {
+        UI.modalTitle.innerText = "Add Employee Record";
         UI.editOriginalId.value = "";
         UI.empId.value = "";
         UI.empId.disabled = false;
@@ -1086,10 +1966,10 @@
         UI.employeeModal.style.display = "flex";
       };
 
-      const openEditModal = (id) => {
-        const emp = _dataset.find(e => e.id === id);
+      var openEditModal = function (id) {
+        var emp = _dataset.find(function (e) { return e.id === id; });
         if (!emp) return;
-        UI.modalTitle.innerText = "Edit Employee";
+        UI.modalTitle.innerText = "Edit Employee Record";
         UI.editOriginalId.value = id;
         UI.empId.value = emp.id;
         UI.empId.disabled = true;
@@ -1100,46 +1980,46 @@
         UI.employeeModal.style.display = "flex";
       };
 
-      const closeModal = () => {
+      var closeModal = function () {
         UI.employeeModal.style.display = "none";
       };
 
-      const saveEmployee = () => {
-        const id = UI.empId.value.trim();
-        const originalId = UI.editOriginalId.value;
-        const dept = UI.empDept.value.trim() || "Unassigned";
-        const gender = UI.empGender.value;
-        const salary = parseFloat(UI.empSalary.value) || 0;
-        const status = UI.empStatus.value;
-        
+      var saveEmployee = function () {
+        var id = UI.empId.value.trim();
+        var originalId = UI.editOriginalId.value;
+        var dept = UI.empDept.value.trim() || "Unassigned";
+        var gender = UI.empGender.value;
+        var salary = parseFloat(UI.empSalary.value) || 0;
+        var status = UI.empStatus.value;
+
         if (!id) {
           alert("Employee ID is required.");
           return;
         }
-        
+
         if (originalId) {
-          const idx = _dataset.findIndex(e => e.id === originalId);
+          var idx = _dataset.findIndex(function (e) { return e.id === originalId; });
           if (idx !== -1) {
-            _dataset[idx] = { id, department: dept, gender, salary, status };
+            _dataset[idx] = { id: id, department: dept, gender: gender, salary: salary, status: status };
           }
         } else {
-          const exists = _dataset.some(e => e.id === id);
+          var exists = _dataset.some(function (e) { return e.id === id; });
           if (exists) {
-            alert("Employee ID already exists. Please use a unique ID.");
+            alert("Employee ID already exists. Please choose a unique ID.");
             return;
           }
-          _dataset.push({ id, department: dept, gender, salary, status });
+          _dataset.push({ id: id, department: dept, gender: gender, salary: salary, status: status });
         }
-        
+
         syncFilters();
         updateIntelligenceDashboard();
         renderDirectory();
         closeModal();
       };
 
-      const deleteEmployee = (id) => {
-        if (confirm(`Are you sure you want to delete employee ${id}?`)) {
-          _dataset = _dataset.filter(e => e.id !== id);
+      var deleteEmployee = function (id) {
+        if (confirm("Are you sure you want to delete employee " + id + "?")) {
+          _dataset = _dataset.filter(function (e) { return e.id !== id; });
           syncFilters();
           updateIntelligenceDashboard();
           renderDirectory();
@@ -1149,36 +2029,36 @@
       /**
        * Analytics Insights Tab Updates
        */
-      const updateInsightsTab = () => {
+      var updateInsightsTab = function () {
         if (!_dataset.length) return;
-        
+
         // 1. Calculate Gender Pay Gap
-        const activeMales = _dataset.filter(e => e.gender.toLowerCase() === 'male' && e.status === 'Active');
-        const activeFemales = _dataset.filter(e => e.gender.toLowerCase() === 'female' && e.status === 'Active');
-        
-        const avgMale = activeMales.length ? activeMales.reduce((acc, curr) => acc + curr.salary, 0) / activeMales.length : 0;
-        const avgFemale = activeFemales.length ? activeFemales.reduce((acc, curr) => acc + curr.salary, 0) / activeFemales.length : 0;
-        
+        var activeMales = _dataset.filter(function (e) { return e.gender.toLowerCase() === 'male' && e.status === 'Active'; });
+        var activeFemales = _dataset.filter(function (e) { return e.gender.toLowerCase() === 'female' && e.status === 'Active'; });
+
+        var avgMale = activeMales.length ? activeMales.reduce(function (acc, curr) { return acc + curr.salary; }, 0) / activeMales.length : 0;
+        var avgFemale = activeFemales.length ? activeFemales.reduce(function (acc, curr) { return acc + curr.salary; }, 0) / activeFemales.length : 0;
+
         if (avgMale === 0 && avgFemale === 0) {
           UI.insightPayGap.innerText = "0%";
           UI.insightPayGap.style.color = "var(--text-main)";
         } else {
-          const gapPercent = (((avgMale - avgFemale) / (avgMale || 1)) * 100).toFixed(1);
+          var gapPercent = (((avgMale - avgFemale) / (avgMale || 1)) * 100).toFixed(1);
           if (gapPercent > 0) {
-            UI.insightPayGap.innerText = `${gapPercent}%`;
+            UI.insightPayGap.innerText = gapPercent + "%";
             UI.insightPayGap.style.color = "var(--danger)";
           } else if (gapPercent < 0) {
-            UI.insightPayGap.innerText = `${Math.abs(gapPercent)}%`;
-            UI.insightPayGap.style.color = "#a855f7"; // Female lead
+            UI.insightPayGap.innerText = Math.abs(gapPercent) + "% (Female Lead)";
+            UI.insightPayGap.style.color = "#7e22ce";
           } else {
             UI.insightPayGap.innerText = "0%";
             UI.insightPayGap.style.color = "var(--success)";
           }
         }
-        
+
         // 2. Attrition Hotspot
-        const deptAttrition = {};
-        _dataset.forEach(e => {
+        var deptAttrition = {};
+        _dataset.forEach(function (e) {
           if (!deptAttrition[e.department]) {
             deptAttrition[e.department] = { total: 0, terminated: 0 };
           }
@@ -1187,274 +2067,304 @@
             deptAttrition[e.department].terminated++;
           }
         });
-        
-        let hotspotDept = "N/A";
-        let maxRate = 0;
-        Object.entries(deptAttrition).forEach(([dept, data]) => {
-          const rate = data.total ? (data.terminated / data.total) : 0;
+
+        var hotspotDept = "N/A";
+        var maxRate = 0;
+        Object.keys(deptAttrition).forEach(function (d) {
+          var rate = deptAttrition[d].total ? (deptAttrition[d].terminated / deptAttrition[d].total) : 0;
           if (rate > maxRate) {
             maxRate = rate;
-            hotspotDept = dept;
+            hotspotDept = d;
           }
         });
-        
-        UI.insightAttritionHotspot.innerText = hotspotDept !== "N/A" ? `${hotspotDept} (${(maxRate * 100).toFixed(1)}%)` : "No Attrition";
+
+        UI.insightAttritionHotspot.innerText = hotspotDept !== "N/A" ? hotspotDept + " (" + (maxRate * 100).toFixed(1) + "%)" : "No Attrition";
         UI.insightAttritionHotspot.style.color = maxRate > 0.15 ? "var(--danger)" : "var(--text-main)";
-        
+
         // 3. Highest Compensated Department
-        const deptSalaries = {};
-        _dataset.forEach(e => {
+        var deptSalaries = {};
+        _dataset.forEach(function (e) {
           if (!deptSalaries[e.department]) {
             deptSalaries[e.department] = { sum: 0, count: 0 };
           }
           deptSalaries[e.department].sum += e.salary;
           deptSalaries[e.department].count++;
         });
-        
-        let highestDept = "N/A";
-        let maxAvgSal = 0;
-        Object.entries(deptSalaries).forEach(([dept, data]) => {
-          const avg = data.count ? (data.sum / data.count) : 0;
+
+        var highestDept = "N/A";
+        var maxAvgSal = 0;
+        Object.keys(deptSalaries).forEach(function (d) {
+          var avg = deptSalaries[d].count ? (deptSalaries[d].sum / deptSalaries[d].count) : 0;
           if (avg > maxAvgSal) {
             maxAvgSal = avg;
-            highestDept = dept;
+            highestDept = d;
           }
         });
-        
-        UI.insightHighestDept.innerText = highestDept !== "N/A" ? `${highestDept} ($${Math.round(maxAvgSal).toLocaleString()})` : "N/A";
-        
+
+        UI.insightHighestDept.innerText = highestDept !== "N/A" ? highestDept + " ($" + Math.round(maxAvgSal).toLocaleString() + ")" : "N/A";
+
         // 4. Render Gender Pay Gap Chart
         renderGenderPayGapChart(deptSalaries);
       };
 
-      var renderGenderPayGapChart = function(deptSalaries) {
+      var renderGenderPayGapChart = function (deptSalaries) {
         var id = 'genderPayGapChart';
-        if (_chartInstances[id]) { try { _chartInstances[id].destroy(); } catch(e) {} }
+        if (_chartInstances[id]) { try { _chartInstances[id].destroy(); } catch (e) { } }
         var depts = Object.keys(deptSalaries).sort();
-        var maleData = depts.map(function(d) {
-          var males = _dataset.filter(function(e) { return e.department === d && e.gender.toLowerCase() === 'male' && e.status === 'Active'; });
-          return males.length ? Math.round(males.reduce(function(acc,curr){return acc+curr.salary;},0)/males.length) : 0;
+        var maleData = depts.map(function (d) {
+          var males = _dataset.filter(function (e) { return e.department === d && e.gender.toLowerCase() === 'male' && e.status === 'Active'; });
+          return males.length ? Math.round(males.reduce(function (acc, curr) { return acc + curr.salary; }, 0) / males.length) : 0;
         });
-        var femaleData = depts.map(function(d) {
-          var females = _dataset.filter(function(e) { return e.department === d && e.gender.toLowerCase() === 'female' && e.status === 'Active'; });
-          return females.length ? Math.round(females.reduce(function(acc,curr){return acc+curr.salary;},0)/females.length) : 0;
+        var femaleData = depts.map(function (d) {
+          var females = _dataset.filter(function (e) { return e.department === d && e.gender.toLowerCase() === 'female' && e.status === 'Active'; });
+          return females.length ? Math.round(females.reduce(function (acc, curr) { return acc + curr.salary; }, 0) / females.length) : 0;
         });
         _chartInstances[id] = MiniChart.create('genderPayGapChart', {
           type: 'bar',
           data: {
             labels: depts,
             datasets: [
-              { label: 'Male Avg', data: maleData, backgroundColor: '#3b82f6' },
-              { label: 'Female Avg', data: femaleData, backgroundColor: '#ec4899' }
+              { label: 'Male', data: maleData, backgroundColor: '#4f46e5' },
+              { label: 'Female', data: femaleData, backgroundColor: '#ec4899' }
             ]
           }
         });
       };
 
       /**
-       * AI report Generation Interface
+       * AI Executive Report Generator
        */
-      const generateAiReport = () => {
+      var generateAiReport = function () {
         if (!_dataset.length) {
-          alert("Please upload a dataset first.");
+          alert("Please ingest a dataset first.");
           return;
         }
-        
+
         UI.aiReportBtn.disabled = true;
-        UI.aiReportBtn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating...`;
-        UI.aiReportContent.innerHTML = `<div style="text-align:center; padding: 40px;"><i class="fa-solid fa-circle-notch fa-spin" style="font-size:2rem; color:var(--primary); margin-bottom:12px;"></i><p>Gemini is synthesizing insights and compiling the executive brief...</p></div>`;
-        
-        const reportPrompt = "Perform a thorough executive HR analysis. Detail the company size, departmental distribution, attrition hotspot warnings, gender pay gap findings, salary curve analysis, and formulate exactly 3 high-impact strategic business recommendations. Structure the report professionally with tables, bold headers, and bullet points.";
-        
+        UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Analyzing...';
+        UI.aiReportContent.innerHTML = '<div style="text-align:center; padding: 40px;"><i class="fa-solid fa-circle-notch fa-spin" style="font-size:2.2rem; color:var(--primary); margin-bottom:12px;"></i><p>Gemini is synthesizing department benchmarks, gender equity gaps, and attrition metrics...</p></div>';
+
+        var reportPrompt = "Synthesize an executive-level HR summary based on the aggregated vector. Highlight headcount distributions, base salary discrepancies, potential gender gaps, top attrition risks, and output exactly 3 actionable recommendations. Structure with headers and standard tables.";
+
         google.script.run
-          .withSuccessHandler(function(response) {
+          .withSuccessHandler(function (response) {
             UI.aiReportContent.innerHTML = MiniMD.parse(response);
             UI.aiReportBtn.disabled = false;
-            UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate Report';
+            UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate Executive Brief';
           })
-          .withFailureHandler(function(error) {
-            UI.aiReportContent.innerHTML = '<span style="color:var(--danger)">Report Generation Failed: ' + error.message + '</span>';
+          .withFailureHandler(function (error) {
+            UI.aiReportContent.innerHTML = '<span style="color:var(--danger)">Compilation Failed: ' + error.message + '</span>';
             UI.aiReportBtn.disabled = false;
-            UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate Report';
+            UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate Executive Brief';
           })
           .askChatbot(reportPrompt, _aiContextStr);
       };
 
       /**
-       * Org Compensation Simulator Logic
+       * Org Simulator tab logic
        */
-      const initSimulator = () => {
+      var initSimulator = function () {
         UI.simSalarySlider.value = 0;
         UI.simSliderVal.innerText = "+0%";
         calculateSimulationImpact();
       };
-      
-      const updateSimSliderLabel = (val) => {
-        const sign = val > 0 ? "+" : "";
-        UI.simSliderVal.innerText = `${sign}${val}%`;
+
+      var updateSimSliderLabel = function (val) {
+        var sign = val > 0 ? "+" : "";
+        UI.simSliderVal.innerText = sign + val + "%";
         calculateSimulationImpact();
       };
-      
-      const calculateSimulationImpact = () => {
+
+      var calculateSimulationImpact = function () {
         if (!_dataset.length) return;
-        
-        const targetDept = UI.simDept.value;
-        const adjustmentPercent = parseFloat(UI.simSalarySlider.value) / 100;
-        
-        const baselineActive = _dataset.filter(e => e.status === 'Active');
-        const baselinePayroll = baselineActive.reduce((acc, curr) => acc + curr.salary, 0);
-        const baselineAvgSalary = baselineActive.length ? baselinePayroll / baselineActive.length : 0;
-        const baselineAttrition = _dataset.length ? (((_dataset.length - baselineActive.length) / _dataset.length) * 100).toFixed(1) + '%' : '0%';
-        
-        let simPayroll = 0;
-        baselineActive.forEach(e => {
+
+        var targetDept = UI.simDept.value;
+        var adjustmentPercent = parseFloat(UI.simSalarySlider.value) / 100;
+
+        var baselineActive = _dataset.filter(function (e) { return e.status === 'Active'; });
+        var baselinePayroll = baselineActive.reduce(function (acc, curr) { return acc + curr.salary; }, 0);
+        var baselineAvgSalary = baselineActive.length ? baselinePayroll / baselineActive.length : 0;
+        var baselineAttrition = _dataset.length ? (((_dataset.length - baselineActive.length) / _dataset.length) * 100).toFixed(1) + '%' : '0%';
+
+        var simPayroll = 0;
+        baselineActive.forEach(function (e) {
           if (e.department === targetDept) {
             simPayroll += e.salary * (1 + adjustmentPercent);
           } else {
             simPayroll += e.salary;
           }
         });
-        const simAvgSalary = baselineActive.length ? simPayroll / baselineActive.length : 0;
-        
-        UI.simPayrollVal.innerText = `$${Math.round(simPayroll).toLocaleString()}`;
-        UI.simSalaryVal.innerText = `$${Math.round(simAvgSalary).toLocaleString()}`;
+        var simAvgSalary = baselineActive.length ? simPayroll / baselineActive.length : 0;
+
+        UI.simPayrollVal.innerText = '$' + Math.round(simPayroll).toLocaleString();
+        UI.simSalaryVal.innerText = '$' + Math.round(simAvgSalary).toLocaleString();
         UI.simHeadcountVal.innerText = baselineActive.length.toLocaleString();
         UI.simAttritionVal.innerText = baselineAttrition;
-        
-        const payrollDiff = simPayroll - baselinePayroll;
-        const payrollPct = baselinePayroll ? ((payrollDiff / baselinePayroll) * 100).toFixed(1) : 0;
+
+        var payrollDiff = simPayroll - baselinePayroll;
+        var payrollPct = baselinePayroll ? ((payrollDiff / baselinePayroll) * 100).toFixed(1) : 0;
         if (payrollDiff > 0) {
           UI.simPayrollChange.className = "change up";
-          UI.simPayrollChange.innerHTML = `<i class="fa-solid fa-arrow-trend-up"></i> +$${Math.round(payrollDiff).toLocaleString()} (+${payrollPct}%)`;
+          UI.simPayrollChange.innerHTML = '<i class="fa-solid fa-arrow-trend-up"></i> +$' + Math.round(payrollDiff).toLocaleString() + ' (+' + payrollPct + '%)';
         } else if (payrollDiff < 0) {
           UI.simPayrollChange.className = "change down";
-          UI.simPayrollChange.innerHTML = `<i class="fa-solid fa-arrow-trend-down"></i> -$${Math.round(Math.abs(payrollDiff)).toLocaleString()} (${payrollPct}%)`;
+          UI.simPayrollChange.innerHTML = '<i class="fa-solid fa-arrow-trend-down"></i> -$' + Math.round(Math.abs(payrollDiff)).toLocaleString() + ' (' + payrollPct + '%)';
         } else {
           UI.simPayrollChange.className = "change stable";
           UI.simPayrollChange.innerText = "No Change";
         }
-        
-        const salaryDiff = simAvgSalary - baselineAvgSalary;
-        const salaryPct = baselineAvgSalary ? ((salaryDiff / baselineAvgSalary) * 100).toFixed(1) : 0;
+
+        var salaryDiff = simAvgSalary - baselineAvgSalary;
+        var salaryPct = baselineAvgSalary ? ((salaryDiff / baselineAvgSalary) * 100).toFixed(1) : 0;
         if (salaryDiff > 0) {
           UI.simSalaryChange.className = "change up";
-          UI.simSalaryChange.innerHTML = `<i class="fa-solid fa-arrow-trend-up"></i> +$${Math.round(salaryDiff).toLocaleString()} (+${salaryPct}%)`;
+          UI.simSalaryChange.innerHTML = '<i class="fa-solid fa-arrow-trend-up"></i> +$' + Math.round(salaryDiff).toLocaleString() + ' (+' + salaryPct + '%)';
         } else if (salaryDiff < 0) {
           UI.simSalaryChange.className = "change down";
-          UI.simSalaryChange.innerHTML = `<i class="fa-solid fa-arrow-trend-down"></i> -$${Math.round(Math.abs(salaryDiff)).toLocaleString()} (${salaryPct}%)`;
+          UI.simSalaryChange.innerHTML = '<i class="fa-solid fa-arrow-trend-down"></i> -$' + Math.round(Math.abs(salaryDiff)).toLocaleString() + ' (' + salaryPct + '%)';
         } else {
           UI.simSalaryChange.className = "change stable";
           UI.simSalaryChange.innerText = "No Change";
         }
       };
 
-      const applySimulation = () => {
-        const targetDept = UI.simDept.value;
+      var applySimulation = function () {
+        var targetDept = UI.simDept.value;
         if (!targetDept) {
           alert("Please select a target department first.");
           return;
         }
-        const adjustmentPercent = parseFloat(UI.simSalarySlider.value) / 100;
+        var adjustmentPercent = parseFloat(UI.simSalarySlider.value) / 100;
         if (adjustmentPercent === 0) {
           alert("Adjustment is set to 0%. Nothing to apply.");
           return;
         }
-        
-        if (confirm(`Are you sure you want to permanently apply a ${UI.simSliderVal.innerText} salary change to all active employees in "${targetDept}"?`)) {
-          _dataset = _dataset.map(e => {
+
+        if (confirm("Apply simulated salary adjustment of " + UI.simSliderVal.innerText + " permanently to active employees in \"" + targetDept + "\"?")) {
+          _dataset = _dataset.map(function (e) {
             if (e.department === targetDept && e.status === 'Active') {
-              return { ...e, salary: Math.round(e.salary * (1 + adjustmentPercent)) };
+              return { id: e.id, department: e.department, gender: e.gender, salary: Math.round(e.salary * (1 + adjustmentPercent)), status: e.status };
             }
             return e;
           });
-          
+
           updateIntelligenceDashboard();
           renderDirectory();
           initSimulator();
-          alert(`Successfully committed salary adjustment for ${targetDept}.`);
+          alert("Adjustment committed successfully to database.");
         }
       };
 
+      var resetSimulation = function () {
+        UI.simSalarySlider.value = 0;
+        UI.simSliderVal.innerText = "+0%";
+        calculateSimulationImpact();
+      };
+
       /**
-       * Analytics Engine & UI Render
+       * Analytics Engine & Visual Redraws
        */
-      const updateIntelligenceDashboard = () => {
+      var updateIntelligenceDashboard = function () {
         if (!_dataset.length) return;
 
-        // 1. Compute Aggregations
-        const total = _dataset.length;
-        const active = _dataset.filter(e => e.status === 'Active').length;
-        const turnoverRate = total ? (((total - active) / total) * 100).toFixed(1) + '%' : '0%';
-        const avgSal = Math.round(_dataset.reduce((acc, curr) => acc + curr.salary, 0) / total);
+        var total = _dataset.length;
+        var active = _dataset.filter(function (e) { return e.status === 'Active'; }).length;
+        var turnoverRate = total ? (((total - active) / total) * 100).toFixed(1) + '%' : '0%';
+        var avgSal = Math.round(_dataset.reduce(function (acc, curr) { return acc + curr.salary; }, 0) / total);
 
-        const mappings = { dept: {}, gender: {} };
-        
-        _dataset.forEach(e => {
-          if (!mappings.dept[e.department]) mappings.dept[e.department] = { count: 0, salarySum: 0 };
+        var mappings = { dept: {}, gender: {} };
+        _dataset.forEach(function (e) {
+          if (!mappings.dept[e.department]) {
+            mappings.dept[e.department] = { count: 0, salarySum: 0 };
+          }
           mappings.dept[e.department].count++;
           mappings.dept[e.department].salarySum += e.salary;
-          if (e.status === 'Active') mappings.gender[e.gender] = (mappings.gender[e.gender] || 0) + 1;
+
+          if (e.status === 'Active') {
+            mappings.gender[e.gender] = (mappings.gender[e.gender] || 0) + 1;
+          }
         });
 
-        // 2. Update KPI Layer
         UI.kpis.headcount.innerText = active.toLocaleString();
-        UI.kpis.salary.innerText = `$${avgSal.toLocaleString()}`;
+        UI.kpis.salary.innerText = '$' + avgSal.toLocaleString();
         UI.kpis.depts.innerText = Object.keys(mappings.dept).length;
         UI.kpis.turnover.innerText = turnoverRate;
 
-        // 3. Build AI Context Vector
         buildAiContext(total, active, avgSal, turnoverRate, mappings.dept, mappings.gender);
-
-        // 4. Render Visualizations
         renderVisuals(mappings.dept, mappings.gender);
       };
 
-      const buildAiContext = (tot, act, sal, turn, depts, genders) => {
-        const deptStr = Object.entries(depts).map(([d, val]) => `${d}: ${val.count} staff (Avg $${Math.round(val.salarySum/val.count)})`).join('; ');
-        const genStr = Object.entries(genders).map(([g, c]) => `${g}: ${c}`).join(', ');
-        
-        _aiContextStr = `System Data Summary: Total Historical Employees: ${tot}. Current Active: ${act}. Attrition Rate: ${turn}. Company Avg Salary: $${sal}. Gender Demographics: ${genStr}. Departmental Breakdown: ${deptStr}.`;
+      var buildAiContext = function (tot, act, sal, turn, depts, genders) {
+        var deptStr = Object.keys(depts).map(function (d) {
+          return d + ': ' + depts[d].count + ' staff (Avg $' + Math.round(depts[d].salarySum / depts[d].count).toLocaleString() + ')';
+        }).join('; ');
+
+        var genStr = Object.keys(genders).map(function (g) {
+          return g + ': ' + genders[g];
+        }).join(', ');
+
+        _aiContextStr = "Total Employees: " + tot + ". Active: " + act + ". Attrition Rate: " + turn + ". Avg Salary: $" + sal + ". Genders: " + genStr + ". Departments: " + deptStr + ".";
       };
 
-      var renderVisuals = function(depts, genders) {
-        var resetChart = function(id) {
+      var renderVisuals = function (depts, genders) {
+        var resetChart = function (id) {
           if (_chartInstances[id]) {
-            try { _chartInstances[id].destroy(); } catch(e) {}
+            try { _chartInstances[id].destroy(); } catch (e) { }
           }
         };
-        var labels = Object.keys(depts);
+        var labels = Object.keys(depts).sort();
 
         try {
           resetChart('dept');
           _chartInstances['dept'] = MiniChart.create('deptChart', {
-            type: 'bar',
-            data: { labels: labels, datasets: [{ data: labels.map(function(l) { return depts[l].count; }), backgroundColor: '#3b82f6' }] }
+            type: 'horizontalBar',
+            data: {
+              labels: labels,
+              datasets: [{
+                data: labels.map(function (l) { return depts[l].count; }),
+                backgroundColor: '#4f46e5'
+              }]
+            }
           });
-        } catch(e) { console.error('dept chart:', e); }
+        } catch (e) { console.error('dept chart error:', e); }
 
         try {
           resetChart('gender');
-          var gLabels = Object.keys(genders);
+          var gLabels = Object.keys(genders).sort();
           _chartInstances['gender'] = MiniChart.create('genderChart', {
             type: 'doughnut',
-            data: { labels: gLabels, datasets: [{ data: gLabels.map(function(g){return genders[g];}), backgroundColor: ['#8b5cf6','#06b6d4','#f43f5e','#cbd5e1'] }] }
+            data: {
+              labels: gLabels,
+              datasets: [{
+                data: gLabels.map(function (g) { return genders[g]; }),
+                backgroundColor: ['#4f46e5', '#0ea5e9', '#ec4899', '#64748b']
+              }]
+            }
           });
-        } catch(e) { console.error('gender chart:', e); }
+        } catch (e) { console.error('gender chart error:', e); }
 
         try {
           resetChart('salary');
           _chartInstances['salary'] = MiniChart.create('salaryChart', {
             type: 'line',
-            data: { labels: labels, datasets: [{ label: 'Avg Compensation', data: labels.map(function(l){ return depts[l].salarySum / depts[l].count; }), borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.05)' }] }
+            data: {
+              labels: labels,
+              datasets: [{
+                label: 'Avg Salary',
+                data: labels.map(function (l) { return depts[l].salarySum / depts[l].count; }),
+                borderColor: '#10b981',
+                backgroundColor: 'rgba(16,185,129,0.06)'
+              }]
+            }
           });
-        } catch(e) { console.error('salary chart:', e); }
+        } catch (e) { console.error('salary chart error:', e); }
       };
 
       /**
-       * AI Communication Interface
+       * AI Analyst query submit
        */
-      const submitQuery = () => {
-        const query = UI.chatInput.value.trim();
+      var submitQuery = function () {
+        var query = UI.chatInput.value.trim();
         if (!query) return;
 
         appendChatMessage('user', query);
@@ -1462,70 +2372,164 @@
         UI.chatInput.disabled = true;
         UI.sendBtn.disabled = true;
 
-        const loadId = `load-${Date.now()}`;
-        appendChatMessage('bot', '<i class="fa-solid fa-circle-notch fa-spin"></i> Processing query...', loadId);
+        var loadId = 'load-' + Date.now();
+        appendChatMessage('bot', '<i class="fa-solid fa-circle-notch fa-spin"></i> AI Analyst is thinking...', loadId);
 
         google.script.run
-          .withSuccessHandler(function(response) {
-            document.getElementById(loadId).remove();
+          .withSuccessHandler(function (response) {
+            var loader = document.getElementById(loadId);
+            if (loader) loader.remove();
             appendChatMessage('bot', MiniMD.parse(response));
             resetChatState();
           })
-          .withFailureHandler(function(error) {
-            document.getElementById(loadId).remove();
-            appendChatMessage('bot', '<span style="color:var(--danger)">Connection Error: ' + error.message + '</span>');
+          .withFailureHandler(function (error) {
+            var loader = document.getElementById(loadId);
+            if (loader) loader.remove();
+            appendChatMessage('bot', '<span style="color:var(--danger)"><i class="fa-solid fa-circle-xmark"></i> Connection Error: ' + error.message + '</span>');
             resetChatState();
           })
-          .askChatbot(query, _aiContextStr || 'No dataset ingested yet. Awaiting data.');
+          .askChatbot(query, _aiContextStr || 'No active dataset ingested.');
       };
 
-      const resetChatState = () => {
+      var resetChatState = function () {
         UI.chatInput.disabled = false;
         UI.sendBtn.disabled = false;
         UI.chatInput.focus();
       };
 
-      const appendChatMessage = (sender, content, id = null) => {
-        const msg = document.createElement('div');
-        msg.className = `msg-bubble ${sender}`;
+      var appendChatMessage = function (sender, content, id) {
+        var msg = document.createElement('div');
+        msg.className = 'msg-bubble ' + sender;
         if (id) msg.id = id;
         msg.innerHTML = content;
         UI.chatHistory.appendChild(msg);
         UI.chatHistory.scrollTop = UI.chatHistory.scrollHeight;
       };
 
-      // Public API
+      /**
+       * Init App Elements & Programmatic Event Listeners
+       */
+      var init = function () {
+        // Cache UI elements
+        UI.status = document.getElementById('statusMessage');
+        UI.chatInput = document.getElementById('chatInput');
+        UI.chatHistory = document.getElementById('chatHistory');
+        UI.sendBtn = document.getElementById('sendBtn');
+
+        UI.tabPanels = document.querySelectorAll('.tab-panel');
+        UI.tabButtons = document.querySelectorAll('.tab-nav .tab-btn');
+
+        UI.dbSearch = document.getElementById('dbSearch');
+        UI.dbDeptFilter = document.getElementById('dbDeptFilter');
+        UI.dbStatusFilter = document.getElementById('dbStatusFilter');
+        UI.directoryTableBody = document.getElementById('directoryTableBody');
+        UI.btnAddEmployee = document.getElementById('btnAddEmployee');
+
+        UI.insightPayGap = document.getElementById('insightPayGap');
+        UI.insightAttritionHotspot = document.getElementById('insightAttritionHotspot');
+        UI.insightHighestDept = document.getElementById('insightHighestDept');
+        UI.aiReportContent = document.getElementById('aiReportContent');
+        UI.aiReportBtn = document.getElementById('aiReportBtn');
+
+        UI.simDept = document.getElementById('simDept');
+        UI.simSalarySlider = document.getElementById('simSalarySlider');
+        UI.simSliderVal = document.getElementById('simSliderVal');
+        UI.simPayrollVal = document.getElementById('simPayrollVal');
+        UI.simPayrollChange = document.getElementById('simPayrollChange');
+        UI.simSalaryVal = document.getElementById('simSalaryVal');
+        UI.simSalaryChange = document.getElementById('simSalaryChange');
+        UI.simHeadcountVal = document.getElementById('simHeadcountVal');
+        UI.simAttritionVal = document.getElementById('simAttritionVal');
+        UI.btnCommitSim = document.getElementById('btnCommitSim');
+        UI.btnResetSim = document.getElementById('btnResetSim');
+
+        UI.employeeModal = document.getElementById('employeeModal');
+        UI.modalTitle = document.getElementById('modalTitle');
+        UI.editOriginalId = document.getElementById('editOriginalId');
+        UI.empId = document.getElementById('empId');
+        UI.empDept = document.getElementById('empDept');
+        UI.empGender = document.getElementById('empGender');
+        UI.empSalary = document.getElementById('empSalary');
+        UI.empStatus = document.getElementById('empStatus');
+        UI.btnSaveEmployee = document.getElementById('btnSaveEmployee');
+        UI.btnCancelModal = document.getElementById('btnCancelModal');
+        UI.btnCloseModal = document.getElementById('btnCloseModal');
+
+        UI.kpis = {
+          headcount: document.getElementById('kpi-headcount'),
+          salary: document.getElementById('kpi-salary'),
+          depts: document.getElementById('kpi-depts'),
+          turnover: document.getElementById('kpi-turnover')
+        };
+
+        // Attach listeners programmatically to avoid Apps Script sandboxing issues
+        document.getElementById('fileUpload').addEventListener('change', handleFileUpload);
+
+        UI.tabButtons.forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var tabId = btn.getAttribute('data-tab');
+            switchTab(tabId);
+          });
+        });
+
+        UI.dbSearch.addEventListener('input', renderDirectory);
+        UI.dbDeptFilter.addEventListener('change', renderDirectory);
+        UI.dbStatusFilter.addEventListener('change', renderDirectory);
+        UI.btnAddEmployee.addEventListener('click', openAddModal);
+
+        UI.chatInput.addEventListener('keypress', function (e) {
+          if (e.key === 'Enter') submitQuery();
+        });
+        UI.sendBtn.addEventListener('click', submitQuery);
+        UI.aiReportBtn.addEventListener('click', generateAiReport);
+
+        UI.simDept.addEventListener('change', calculateSimulationImpact);
+        UI.simSalarySlider.addEventListener('input', function (e) {
+          updateSimSliderLabel(e.target.value);
+        });
+        UI.btnCommitSim.addEventListener('click', applySimulation);
+        UI.btnResetSim.addEventListener('click', resetSimulation);
+
+        UI.btnCloseModal.addEventListener('click', closeModal);
+        UI.btnCancelModal.addEventListener('click', closeModal);
+        UI.btnSaveEmployee.addEventListener('click', saveEmployee);
+
+        // Window resize responsive chart redrawing
+        window.addEventListener('resize', function () {
+          if (_dataset.length > 0) {
+            updateIntelligenceDashboard();
+            if (document.getElementById('tab-insights').classList.contains('active')) {
+              updateInsightsTab();
+            }
+          }
+        });
+      };
+
+      // Public API exposing handlers needed globally (like inline generated delete/edit rows)
       return {
-        handleFileUpload,
-        handleTableSelect,
-        submitQuery,
-        switchTab,
-        renderDirectory,
-        openAddModal,
-        openEditModal,
-        closeModal,
-        saveEmployee,
-        deleteEmployee,
-        generateAiReport,
-        updateSimSliderLabel,
-        calculateSimulationImpact,
-        applySimulation
+        init: init,
+        openEditModal: openEditModal,
+        deleteEmployee: deleteEmployee,
+        switchTab: switchTab,
+        handleFileUpload: handleFileUpload,
+        renderDirectory: renderDirectory,
+        openAddModal: openAddModal,
+        closeModal: closeModal,
+        saveEmployee: saveEmployee,
+        generateAiReport: generateAiReport,
+        updateSimSliderLabel: updateSimSliderLabel,
+        calculateSimulationImpact: calculateSimulationImpact,
+        applySimulation: applySimulation,
+        resetSimulation: resetSimulation,
+        submitQuery: submitQuery
       };
     })();
-    // Startup CDN library availability check
-    window.addEventListener('DOMContentLoaded', () => {
-      const missing = [];
-      if (typeof Papa === 'undefined') missing.push('PapaParse (CSV parser)');
-      if (typeof XLSX === 'undefined') missing.push('SheetJS (Excel parser)');
-      if (typeof Chart === 'undefined') missing.push('Chart.js (charts)');
-      if (missing.length > 0) {
-        const el = document.getElementById('statusMessage');
-        if (el) {
-          el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> CDN failed: ${missing.join(', ')} — check internet/firewall`;
-          el.style.color = '#ef4444';
-        }
-      }
+
+    // Run initialization once HTML structure has loaded
+    window.addEventListener('DOMContentLoaded', function () {
+      AppController.init();
     });
   </script>
 </body>
+
 </html>

@@ -1,44 +1,47 @@
 # Data Flow & ETL Pipeline
 
-Because HR data is inherently sensitive (PII, salaries, termination status), this project completely avoids storing raw data in a database. All processing, cleansing, and aggregation occurs strictly in-memory within the client's browser.
+Because workforce databases contain sensitive details (compensation rates, employee IDs, genders, and statuses), the HR Ecosystem Portal utilizes a zero-storage data policy. All cleaning, transformation, and visualizations occur strictly within the client browser's sandbox.
 
-## ETL Process Diagram
+## ETL Process sequence
 
 ```mermaid
 sequenceDiagram
-    actor User
+    actor HR as HR User
     participant App as AppController (Frontend)
-    participant Papa as PapaParse
-    participant Dashboard as UI Dashboard
-    participant Backend as askChatbot (Apps Script)
+    participant Parser as MiniCSV / MiniXLSX
+    participant UI as Dashboard & Tables
+    participant Backend as GAS askChatbot
     participant Gemini as Gemini API
 
-    User->>App: 1. Upload HR Data (CSV)
-    App->>Papa: 2. Stream & Parse CSV
-    Papa-->>App: 3. Return JSON Array
+    HR->>App: 1. Drag/Select Dataset (CSV / XLSX)
+    App->>Parser: 2. Parse Raw File bytes
+    Parser-->>App: 3. Return JSON Array
     
-    note over App: 4. Execute ETL Pipeline<br/>- Cleanse Salaries (Regex)<br/>- Standardize Status Strings<br/>- Aggregate KPIs
+    note over App: 4. Execute ETL Pipeline<br/>- Dynamic header resolution (Regex)<br/>- Currency cleansing (Remove $, commas)<br/>- Standardize statuses (Active/Terminated)<br/>- Calculate KPIs & Distributions
     
-    App->>Dashboard: 5. Render KPIs & Charts
+    App->>UI: 5. Render KPIs, Data Grid & Canvas Charts
     
-    note over App: 6. Generate Context Vector<br/>(Aggregated string of metrics)
+    note over App: 6. Build Context Vector<br/>(Aggregated summary string of non-PII metrics)
     
-    User->>App: 7. Submits Chat Query
-    App->>Backend: 8. Send Query + Context Vector
-    Backend->>Gemini: 9. Prompt Engineering + Payload
-    Gemini-->>Backend: 10. AI Insights (JSON)
-    Backend-->>App: 11. Parsed Markdown response
-    App->>Dashboard: 12. Render in Chat UI
+    HR->>App: 7. Submits Chat Query / Generates Brief
+    App->>Backend: 8. Call with Query + Context Vector
+    Backend->>Gemini: 9. Prompt Engineering payload + Key
+    Gemini-->>Backend: 10. Analytical Markdown Response
+    Backend-->>App: 11. Success Callback
+    App->>UI: 12. Parse & Render in Markdown View
 ```
 
-## Privacy & Security Strategy
+## Security & Data Integrity
 
-At no point is the raw CSV data array sent to the Gemini API or the Google Apps Script backend. 
-
-The pipeline works as follows:
-1. **Extract**: PapaParse streams the CSV file locally from the user's machine.
-2. **Transform**: The `AppController` standardizes column headers dynamically (e.g., matching "Pay", "Salary", "Compensation"), cleanses string currency into floats, and computes standard active vs. terminated states.
-3. **Load**: The data is loaded into an in-memory variable `_dataset`.
-4. **Aggregation**: The AppController calculates summary aggregations (e.g., total headcount, averages, demographic distributions).
-5. **Context Vector**: A string called `_aiContextStr` is generated, summarizing the data (e.g., *"Total Historical Employees: 1500. Current Active: 1200. Attrition Rate: 20%. Company Avg Salary: $85,000..."*).
-6. **Transmission**: Only the `_aiContextStr` (aggregated, non-PII summary) and the User's text query are transmitted over the network for AI analysis.
+1. **Extract**: The user selects a document. The client-side parser reads file content in-memory as an ArrayBuffer or Text stream.
+2. **Transform**: The `AppController` runs mapping logic:
+   - Matches keys like "pay", "wage", or "compensation" to standardized `salary` values.
+   - Cleanses string text like `"$120,000.50"` into numeric floats (`120000.5`).
+   - Normalizes statuses (e.g. "Terminated", "Resigned", "Inactive" map to `"Terminated"`).
+   - Filters out corrupt or blank dataset rows.
+3. **Load**: Data is saved to local runtime state `_dataset`.
+4. **Aggregation**: Key indicators are synthesized:
+   - Attrition rates by dividing terminated headcount by historical total headcount.
+   - Gender pay gap benchmarks.
+5. **Context Vector Generation**: Aggregated stats are converted to a text summary vector. Raw employee names, IDs, or exact individual records are never appended, ensuring absolute privacy.
+6. **AI Dispatch**: Only the summary vector is sent to the backend proxy.
