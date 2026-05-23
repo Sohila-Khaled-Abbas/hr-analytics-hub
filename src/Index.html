@@ -5,11 +5,286 @@
   <title>HR Analytics Hub</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/sql.js@1.14.0/dist/sql-wasm.js"></script>
+  <!-- Inline micro-libraries (ES5 only — compatible with GAS Caja sandbox) -->
+  <script>
+  /* ===== Micro CSV Parser ===== */
+  var MiniCSV = {
+    parse: function(text) {
+      var rows = [], cur = [], field = '', inQ = false, i, c, nc;
+      for (i = 0; i < text.length; i++) {
+        c = text[i]; nc = text[i+1];
+        if (inQ) {
+          if (c === '"' && nc === '"') { field += '"'; i++; }
+          else if (c === '"') { inQ = false; }
+          else { field += c; }
+        } else {
+          if (c === '"') { inQ = true; }
+          else if (c === ',') { cur.push(field); field = ''; }
+          else if (c === '\n' || (c === '\r' && nc === '\n')) {
+            cur.push(field); field = '';
+            if (c === '\r') i++;
+            rows.push(cur); cur = [];
+          } else if (c === '\r') { cur.push(field); field = ''; rows.push(cur); cur = []; }
+          else { field += c; }
+        }
+      }
+      cur.push(field); if (cur.length > 1 || cur[0] !== '') rows.push(cur);
+      if (rows.length < 2) return [];
+      var headers = rows[0], out = [];
+      for (var r = 1; r < rows.length; r++) {
+        if (rows[r].length === 0 || (rows[r].length === 1 && rows[r][0] === '')) continue;
+        var obj = {};
+        for (var h = 0; h < headers.length; h++) obj[headers[h]] = (rows[r][h] || '').trim();
+        out.push(obj);
+      }
+      return out;
+    }
+  };
+
+  /* ===== Micro XLSX Parser (reads .xlsx ZIP structure) ===== */
+  var MiniXLSX = {
+    parse: function(arrayBuffer, callback) {
+      /* XLSX is a ZIP. We use a minimal ZIP reader. */
+      try {
+        var data = new Uint8Array(arrayBuffer);
+        /* Find all local file headers (PK\x03\x04) */
+        var files = {}, i = 0;
+        while (i < data.length - 4) {
+          if (data[i]===0x50&&data[i+1]===0x4B&&data[i+2]===0x03&&data[i+3]===0x04) {
+            var comp = data[i+8]|(data[i+9]<<8);
+            var csize = data[i+18]|(data[i+19]<<8)|(data[i+20]<<16)|(data[i+21]<<24);
+            var usize = data[i+22]|(data[i+23]<<8)|(data[i+24]<<16)|(data[i+25]<<24);
+            var fnLen = data[i+26]|(data[i+27]<<8);
+            var extLen = data[i+28]|(data[i+29]<<8);
+            var fnStart = i + 30;
+            var fn = String.fromCharCode.apply(null, data.subarray(fnStart, fnStart+fnLen));
+            var dStart = fnStart + fnLen + extLen;
+            var raw = data.subarray(dStart, dStart + csize);
+            if (comp === 0) {
+              files[fn] = raw;
+            } else if (comp === 8) {
+              try { files[fn] = pako_inflate(raw); } catch(e) { files[fn] = raw; }
+            }
+            i = dStart + csize;
+          } else { i++; }
+        }
+        /* Find first sheet XML */
+        var sheetXml = null;
+        var sheetKeys = Object.keys(files);
+        for (var k = 0; k < sheetKeys.length; k++) {
+          if (/xl\/worksheets\/sheet1/.test(sheetKeys[k])) {
+            sheetXml = MiniXLSX._u8ToString(files[sheetKeys[k]]); break;
+          }
+        }
+        /* Parse shared strings */
+        var sst = [];
+        for (var sk = 0; sk < sheetKeys.length; sk++) {
+          if (/sharedStrings/.test(sheetKeys[sk])) {
+            var sstXml = MiniXLSX._u8ToString(files[sheetKeys[sk]]);
+            var siRe = /<si>([\s\S]*?)<\/si>/g, siM;
+            while ((siM = siRe.exec(sstXml)) !== null) {
+              var tAll = '', tRe = /<t[^>]*>([^<]*)<\/t>/g, tM;
+              while ((tM = tRe.exec(siM[1])) !== null) tAll += tM[1];
+              sst.push(tAll.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&#39;/g,"'").replace(/&quot;/g,'"'));
+            }
+            break;
+          }
+        }
+        if (!sheetXml) { callback([]); return; }
+        /* Parse rows */
+        var rows = [], rowRe = /<row[^>]*>([\s\S]*?)<\/row>/g, rowM;
+        while ((rowM = rowRe.exec(sheetXml)) !== null) {
+          var cells = [], cellRe = /<c r="([A-Z]+)(\d+)"([^>]*)>([\s\S]*?)<\/c>/g, cM;
+          while ((cM = cellRe.exec(rowM[1])) !== null) {
+            var col = MiniXLSX._colIdx(cM[1]);
+            var attr = cM[3], inner = cM[4];
+            var vM = /<v>([^<]*)<\/v>/.exec(inner);
+            var val = vM ? vM[1] : '';
+            if (/t="s"/.test(attr)) val = sst[parseInt(val, 10)] || '';
+            while (cells.length < col) cells.push('');
+            cells[col] = val;
+          }
+          rows.push(cells);
+        }
+        if (rows.length < 2) { callback([]); return; }
+        var headers = rows[0], out = [];
+        for (var r = 1; r < rows.length; r++) {
+          var isEmpty = true;
+          for (var ci = 0; ci < rows[r].length; ci++) { if (rows[r][ci]) { isEmpty = false; break; } }
+          if (isEmpty) continue;
+          var obj = {};
+          for (var h = 0; h < headers.length; h++) obj[headers[h] || 'Col'+h] = (rows[r][h] || '').toString().trim();
+          out.push(obj);
+        }
+        callback(out);
+      } catch(e) { console.error('XLSX parse error:', e); callback([]); }
+    },
+    _u8ToString: function(u8) {
+      var out = '', chunk = 8192;
+      for (var i = 0; i < u8.length; i += chunk) {
+        out += String.fromCharCode.apply(null, u8.subarray(i, i+chunk));
+      }
+      return decodeURIComponent(escape(out));
+    },
+    _colIdx: function(letters) {
+      var n = 0;
+      for (var i = 0; i < letters.length; i++) n = n * 26 + (letters.charCodeAt(i) - 64);
+      return n - 1;
+    }
+  };
+
+  /* ===== Micro Canvas Chart Engine ===== */
+  var MiniChart = {
+    _instances: {},
+    create: function(canvasId, config) {
+      var canvas = document.getElementById(canvasId);
+      if (!canvas) return null;
+      /* Destroy previous */
+      if (MiniChart._instances[canvasId]) {
+        MiniChart._instances[canvasId] = null;
+      }
+      var inst = { canvas: canvas, config: config };
+      MiniChart._instances[canvasId] = inst;
+      MiniChart._draw(inst);
+      return { destroy: function() { MiniChart._instances[canvasId] = null; var ctx = canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); } };
+    },
+    _draw: function(inst) {
+      var canvas = inst.canvas, cfg = inst.config;
+      var ctx = canvas.getContext('2d');
+      canvas.width = canvas.offsetWidth || canvas.parentElement.offsetWidth || 300;
+      canvas.height = canvas.offsetHeight || 200;
+      var W = canvas.width, H = canvas.height;
+      ctx.clearRect(0,0,W,H);
+      if (cfg.type === 'bar' || cfg.type === 'line') {
+        MiniChart._drawBarLine(ctx, W, H, cfg);
+      } else if (cfg.type === 'doughnut') {
+        MiniChart._drawDoughnut(ctx, W, H, cfg);
+      }
+    },
+    _drawBarLine: function(ctx, W, H, cfg) {
+      var pad = {top:20, right:20, bottom:60, left:65};
+      var data = cfg.data, labels = data.labels || [];
+      /* Collect all values */
+      var allVals = [];
+      for (var di = 0; di < data.datasets.length; di++) {
+        var ds = data.datasets[di];
+        for (var vi = 0; vi < ds.data.length; vi++) allVals.push(ds.data[vi] || 0);
+      }
+      var maxVal = Math.max.apply(null, allVals) || 1;
+      var chartW = W - pad.left - pad.right;
+      var chartH = H - pad.top - pad.bottom;
+      /* Grid */
+      ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+      var gridLines = 5;
+      for (var g = 0; g <= gridLines; g++) {
+        var y = pad.top + chartH - (g / gridLines) * chartH;
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + chartW, y); ctx.stroke();
+        var lbl = MiniChart._fmtVal(maxVal * g / gridLines);
+        ctx.fillStyle='#94a3b8'; ctx.font='10px Inter,sans-serif'; ctx.textAlign='right';
+        ctx.fillText(lbl, pad.left - 6, y + 3);
+      }
+      var numDs = data.datasets.length;
+      var barW = Math.max(4, (chartW / Math.max(labels.length, 1)) - 8);
+      var groupW = barW * numDs + (numDs - 1) * 2;
+      /* Draw each dataset */
+      var colors = ['#3b82f6','#ec4899','#10b981','#f59e0b','#8b5cf6'];
+      for (var di2 = 0; di2 < data.datasets.length; di2++) {
+        var ds2 = data.datasets[di2];
+        var col = ds2.backgroundColor || colors[di2 % colors.length];
+        ctx.fillStyle = col; ctx.strokeStyle = ds2.borderColor || col; ctx.lineWidth = 2;
+        var prevX = -1, prevY = -1;
+        for (var vi2 = 0; vi2 < labels.length; vi2++) {
+          var x = pad.left + (vi2 / labels.length) * chartW + chartW / (2 * labels.length);
+          var val2 = ds2.data[vi2] || 0;
+          var barH = (val2 / maxVal) * chartH;
+          var y2 = pad.top + chartH - barH;
+          if (cfg.type === 'bar') {
+            var bx = x - groupW/2 + di2 * (barW + 2);
+            ctx.fillRect(bx, y2, barW, barH);
+          } else {
+            if (prevX >= 0) {
+              ctx.beginPath(); ctx.moveTo(prevX, prevY); ctx.lineTo(x, y2); ctx.stroke();
+            }
+            ctx.beginPath(); ctx.arc(x, y2, 3, 0, 2*Math.PI); ctx.fillStyle = col; ctx.fill();
+            prevX = x; prevY = y2;
+          }
+        }
+      }
+      /* X labels */
+      ctx.fillStyle='#64748b'; ctx.font='10px Inter,sans-serif'; ctx.textAlign='center';
+      for (var li = 0; li < labels.length; li++) {
+        var lx = pad.left + (li / labels.length) * chartW + chartW / (2 * labels.length);
+        var lbl2 = (labels[li] || '').toString();
+        if (lbl2.length > 12) lbl2 = lbl2.substr(0,11) + '…';
+        ctx.fillText(lbl2, lx, H - pad.bottom + 16);
+      }
+    },
+    _drawDoughnut: function(ctx, W, H, cfg) {
+      var data = cfg.data;
+      var vals = data.datasets[0].data, labels = data.labels || [];
+      var colors = data.datasets[0].backgroundColor || ['#8b5cf6','#06b6d4','#f43f5e','#cbd5e1'];
+      var total = 0;
+      for (var i = 0; i < vals.length; i++) total += (vals[i] || 0);
+      if (total === 0) return;
+      var cx = W * 0.42, cy = H / 2, r = Math.min(cx, cy) * 0.82, inner = r * 0.62;
+      var angle = -Math.PI / 2;
+      for (var i2 = 0; i2 < vals.length; i2++) {
+        var sweep = (vals[i2] / total) * 2 * Math.PI;
+        ctx.beginPath(); ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, r, angle, angle + sweep);
+        ctx.closePath(); ctx.fillStyle = colors[i2 % colors.length]; ctx.fill();
+        angle += sweep;
+      }
+      /* Inner hole */
+      ctx.beginPath(); ctx.arc(cx, cy, inner, 0, 2*Math.PI);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      /* Legend */
+      var lx = W * 0.88, ly = cy - (labels.length * 18) / 2;
+      for (var i3 = 0; i3 < labels.length; i3++) {
+        ctx.fillStyle = colors[i3 % colors.length];
+        ctx.fillRect(lx - 52, ly + i3*20, 12, 12);
+        ctx.fillStyle = '#374151'; ctx.font = '11px Inter,sans-serif'; ctx.textAlign='left';
+        var pct = total > 0 ? Math.round((vals[i3]/total)*100) : 0;
+        ctx.fillText((labels[i3]||'') + ' ' + pct + '%', lx - 36, ly + i3*20 + 10);
+      }
+    },
+    _fmtVal: function(v) {
+      if (v >= 1000000) return '$' + (v/1000000).toFixed(1) + 'M';
+      if (v >= 1000) return '$' + (v/1000).toFixed(0) + 'K';
+      return Math.round(v).toString();
+    }
+  };
+
+  /* ===== Micro Markdown Renderer ===== */
+  var MiniMD = {
+    parse: function(md) {
+      if (!md) return '';
+      var h = md
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/^#{4}\s+(.+)$/gm,'<h4>$1</h4>')
+        .replace(/^#{3}\s+(.+)$/gm,'<h3>$1</h3>')
+        .replace(/^#{2}\s+(.+)$/gm,'<h2>$1</h2>')
+        .replace(/^#\s+(.+)$/gm,'<h1>$1</h1>')
+        .replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>')
+        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g,'<em>$1</em>')
+        .replace(/`([^`]+)`/g,'<code>$1</code>')
+        .replace(/^[-*]\s+(.+)$/gm,'<li>$1</li>')
+        .replace(/(<li>[\s\S]*?<\/li>)/g,'<ul>$1</ul>')
+        .replace(/\|(.+)\|\n\|[-| ]+\|\n((?:\|.+\|\n?)*)/g, function(m, hdr, body) {
+          var ths = hdr.split('|').filter(function(s){return s.trim();}).map(function(s){return '<th>'+s.trim()+'</th>';}).join('');
+          var trs = body.trim().split('\n').map(function(row){
+            var tds = row.split('|').filter(function(s){return s.trim();}).map(function(s){return '<td>'+s.trim()+'</td>';}).join('');
+            return '<tr>'+tds+'</tr>';
+          }).join('');
+          return '<table style="border-collapse:collapse;width:100%;margin:8px 0"><thead><tr>'+ths+'</tr></thead><tbody>'+trs+'</tbody></table>';
+        })
+        .replace(/\n\n+/g,'</p><p>')
+        .replace(/\n/g,'<br>');
+      return '<p>' + h + '</p>';
+    }
+  };
+  </script>
   <style>
     /* CSS Reset & Variables */
     :root { 
@@ -181,9 +456,9 @@
 
     <div class="data-ingress">
       <label for="fileUpload" class="upload-btn">
-        <i class="fa-solid fa-cloud-arrow-up"></i> Ingest Dataset (CSV/XLSX/DB)
+        <i class="fa-solid fa-cloud-arrow-up"></i> Ingest Dataset (CSV / XLSX)
       </label>
-      <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls,.db,.sqlite,.sqlite3" onchange="AppController.handleFileUpload(event)">
+      <input type="file" id="fileUpload" accept=".csv,.xlsx,.xls" onchange="AppController.handleFileUpload(event)">
       <div id="statusMessage" class="status-indicator">Awaiting Data...</div>
       
       <!-- SQLite Table Selection Container (Hidden by default) -->
@@ -570,117 +845,54 @@
       /**
        * Primary Ingress Pipeline
        */
-      const handleFileUpload = (event) => {
-        const file = event.target.files[0];
+      var handleFileUpload = function(event) {
+        var file = event.target.files[0];
         if (!file) return;
 
-        // Reset SQLite and table selector states
-        UI.tableSelectorContainer.style.display = "none";
-        UI.tableSelect.innerHTML = "";
-        _sqliteDB = null;
+        UI.tableSelectorContainer.style.display = 'none';
+        UI.tableSelect.innerHTML = '';
 
-        UI.status.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Parsing Dataset...`;
-        UI.status.style.color = "var(--primary)";
+        UI.status.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Parsing Dataset...';
+        UI.status.style.color = 'var(--primary)';
 
-        const fileName = file.name.toLowerCase();
+        var fileName = file.name.toLowerCase();
 
-        if (fileName.endsWith('.csv')) {
-          Papa.parse(file, {
-            header: true,
-            skipEmptyLines: true,
-            complete: (results) => executeETL(results.data),
-            error: (err) => {
-              UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error: ${err.message}`;
-              UI.status.style.color = "var(--danger)";
-            }
-          });
-        } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
-          const reader = new FileReader();
-          reader.onload = (e) => {
+        if (fileName.indexOf('.csv') !== -1) {
+          var reader = new FileReader();
+          reader.onload = function(e) {
             try {
-              const data = new Uint8Array(e.target.result);
-              const workbook = XLSX.read(data, { type: 'array' });
-              
-              if (workbook.SheetNames.length === 0) {
-                throw new Error("The Excel file has no worksheets.");
-              }
-              
-              const firstSheetName = workbook.SheetNames[0];
-              const worksheet = workbook.Sheets[firstSheetName];
-              const rawData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-              
-              executeETL(rawData);
-            } catch (err) {
-              UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error: ${err.message}`;
-              UI.status.style.color = "var(--danger)";
+              var rows = MiniCSV.parse(e.target.result);
+              executeETL(rows);
+            } catch(err) {
+              UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> CSV Error: ' + err.message;
+              UI.status.style.color = 'var(--danger)';
             }
           };
-          reader.onerror = () => {
-            UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error reading file.`;
-            UI.status.style.color = "var(--danger)";
+          reader.onerror = function() {
+            UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Error reading file.';
+            UI.status.style.color = 'var(--danger)';
           };
-          reader.readAsArrayBuffer(file);
-        } else if (fileName.endsWith('.db') || fileName.endsWith('.sqlite') || fileName.endsWith('.sqlite3')) {
-          const reader = new FileReader();
-          reader.onload = async (e) => {
-            try {
-              const buffer = e.target.result;
-              const uInt8Array = new Uint8Array(buffer);
-              
-              UI.status.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Initializing DB Engine...`;
-              
-              // Load sql.js
-              const SQL = await initSqlJs({
-                locateFile: filename => `https://cdn.jsdelivr.net/npm/sql.js@1.14.0/dist/${filename}`
-              });
-              
-              _sqliteDB = new SQL.Database(uInt8Array);
-              
-              // Query tables list, excluding sqlite system tables
-              const tablesResult = _sqliteDB.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
-              if (tablesResult.length === 0 || tablesResult[0].values.length === 0) {
-                throw new Error("No tables found in the database.");
-              }
-              
-              const tables = tablesResult[0].values.map(val => val[0]);
-              
-              if (tables.length === 1) {
-                loadTableData(tables[0]);
+          reader.readAsText(file);
+        } else if (fileName.indexOf('.xlsx') !== -1 || fileName.indexOf('.xls') !== -1) {
+          var reader2 = new FileReader();
+          reader2.onload = function(e) {
+            MiniXLSX.parse(e.target.result, function(rows) {
+              if (rows.length === 0) {
+                UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> No data found in Excel file.';
+                UI.status.style.color = 'var(--danger)';
               } else {
-                UI.status.innerHTML = `<i class="fa-solid fa-circle-question"></i> Select a table below`;
-                
-                // Populate selector dropdown
-                UI.tableSelect.innerHTML = `<option value="" disabled selected>-- Select Table --</option>`;
-                tables.forEach(tbl => {
-                  const opt = document.createElement('option');
-                  opt.value = tbl;
-                  opt.innerText = tbl;
-                  UI.tableSelect.appendChild(opt);
-                });
-                
-                UI.tableSelectorContainer.style.display = "flex";
-                
-                // Smart select: look for table with employee-like terms
-                const hrTable = tables.find(t => /employee|hr|workforce|staff|salary/i.test(t));
-                if (hrTable) {
-                  UI.tableSelect.value = hrTable;
-                  loadTableData(hrTable);
-                }
+                executeETL(rows);
               }
-            } catch (err) {
-              console.error(err);
-              UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> DB Error: ${err.message}`;
-              UI.status.style.color = "var(--danger)";
-            }
+            });
           };
-          reader.onerror = () => {
-            UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Error reading file.`;
-            UI.status.style.color = "var(--danger)";
+          reader2.onerror = function() {
+            UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Error reading file.';
+            UI.status.style.color = 'var(--danger)';
           };
-          reader.readAsArrayBuffer(file);
+          reader2.readAsArrayBuffer(file);
         } else {
-          UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Unsupported file format.`;
-          UI.status.style.color = "var(--danger)";
+          UI.status.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Unsupported format. Please upload CSV or XLSX.';
+          UI.status.style.color = 'var(--danger)';
         }
       };
 
@@ -1015,37 +1227,26 @@
         renderGenderPayGapChart(deptSalaries);
       };
 
-      const renderGenderPayGapChart = (deptSalaries) => {
-        const id = 'genderPayGapChart';
-        if (_chartInstances[id]) _chartInstances[id].destroy();
-        
-        const depts = Object.keys(deptSalaries).sort();
-        
-        const maleData = depts.map(d => {
-          const males = _dataset.filter(e => e.department === d && e.gender.toLowerCase() === 'male' && e.status === 'Active');
-          return males.length ? Math.round(males.reduce((acc, curr) => acc + curr.salary, 0) / males.length) : 0;
+      var renderGenderPayGapChart = function(deptSalaries) {
+        var id = 'genderPayGapChart';
+        if (_chartInstances[id]) { try { _chartInstances[id].destroy(); } catch(e) {} }
+        var depts = Object.keys(deptSalaries).sort();
+        var maleData = depts.map(function(d) {
+          var males = _dataset.filter(function(e) { return e.department === d && e.gender.toLowerCase() === 'male' && e.status === 'Active'; });
+          return males.length ? Math.round(males.reduce(function(acc,curr){return acc+curr.salary;},0)/males.length) : 0;
         });
-        
-        const femaleData = depts.map(d => {
-          const females = _dataset.filter(e => e.department === d && e.gender.toLowerCase() === 'female' && e.status === 'Active');
-          return females.length ? Math.round(females.reduce((acc, curr) => acc + curr.salary, 0) / females.length) : 0;
+        var femaleData = depts.map(function(d) {
+          var females = _dataset.filter(function(e) { return e.department === d && e.gender.toLowerCase() === 'female' && e.status === 'Active'; });
+          return females.length ? Math.round(females.reduce(function(acc,curr){return acc+curr.salary;},0)/females.length) : 0;
         });
-        
-        _chartInstances[id] = new Chart(document.getElementById('genderPayGapChart'), {
+        _chartInstances[id] = MiniChart.create('genderPayGapChart', {
           type: 'bar',
           data: {
             labels: depts,
             datasets: [
-              { label: 'Male Avg', data: maleData, backgroundColor: '#3b82f6', borderRadius: 4 },
-              { label: 'Female Avg', data: femaleData, backgroundColor: '#ec4899', borderRadius: 4 }
+              { label: 'Male Avg', data: maleData, backgroundColor: '#3b82f6' },
+              { label: 'Female Avg', data: femaleData, backgroundColor: '#ec4899' }
             ]
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            scales: {
-              y: { beginAtZero: true, ticks: { callback: value => '$' + value.toLocaleString() } }
-            }
           }
         });
       };
@@ -1066,15 +1267,15 @@
         const reportPrompt = "Perform a thorough executive HR analysis. Detail the company size, departmental distribution, attrition hotspot warnings, gender pay gap findings, salary curve analysis, and formulate exactly 3 high-impact strategic business recommendations. Structure the report professionally with tables, bold headers, and bullet points.";
         
         google.script.run
-          .withSuccessHandler((response) => {
-            UI.aiReportContent.innerHTML = marked.parse(response);
+          .withSuccessHandler(function(response) {
+            UI.aiReportContent.innerHTML = MiniMD.parse(response);
             UI.aiReportBtn.disabled = false;
-            UI.aiReportBtn.innerHTML = `<i class="fa-solid fa-bolt"></i> Generate Report`;
+            UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate Report';
           })
-          .withFailureHandler((error) => {
-            UI.aiReportContent.innerHTML = `<span style="color:var(--danger)">Report Generation Failed: ${error.message}</span>`;
+          .withFailureHandler(function(error) {
+            UI.aiReportContent.innerHTML = '<span style="color:var(--danger)">Report Generation Failed: ' + error.message + '</span>';
             UI.aiReportBtn.disabled = false;
-            UI.aiReportBtn.innerHTML = `<i class="fa-solid fa-bolt"></i> Generate Report`;
+            UI.aiReportBtn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate Report';
           })
           .askChatbot(reportPrompt, _aiContextStr);
       };
@@ -1215,44 +1416,38 @@
         _aiContextStr = `System Data Summary: Total Historical Employees: ${tot}. Current Active: ${act}. Attrition Rate: ${turn}. Company Avg Salary: $${sal}. Gender Demographics: ${genStr}. Departmental Breakdown: ${deptStr}.`;
       };
 
-      const renderVisuals = (depts, genders) => {
-        if (typeof Chart === 'undefined') {
-          console.warn('Chart.js unavailable — skipping chart render.');
-          return;
-        }
-        
-        const resetChart = (id) => { if(_chartInstances[id]) { try { _chartInstances[id].destroy(); } catch(e) {} } };
-        const labels = Object.keys(depts);
+      var renderVisuals = function(depts, genders) {
+        var resetChart = function(id) {
+          if (_chartInstances[id]) {
+            try { _chartInstances[id].destroy(); } catch(e) {}
+          }
+        };
+        var labels = Object.keys(depts);
 
         try {
-          // Chart: Departments
           resetChart('dept');
-          _chartInstances['dept'] = new Chart(document.getElementById('deptChart'), {
+          _chartInstances['dept'] = MiniChart.create('deptChart', {
             type: 'bar',
-            data: { labels, datasets: [{ data: labels.map(l => depts[l].count), backgroundColor: '#3b82f6', borderRadius: 6 }] },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+            data: { labels: labels, datasets: [{ data: labels.map(function(l) { return depts[l].count; }), backgroundColor: '#3b82f6' }] }
           });
-        } catch(e) { console.error('dept chart error:', e); }
+        } catch(e) { console.error('dept chart:', e); }
 
         try {
-          // Chart: Gender
           resetChart('gender');
-          _chartInstances['gender'] = new Chart(document.getElementById('genderChart'), {
+          var gLabels = Object.keys(genders);
+          _chartInstances['gender'] = MiniChart.create('genderChart', {
             type: 'doughnut',
-            data: { labels: Object.keys(genders), datasets: [{ data: Object.values(genders), backgroundColor: ['#8b5cf6', '#06b6d4', '#f43f5e', '#cbd5e1'] }] },
-            options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'right' } } }
+            data: { labels: gLabels, datasets: [{ data: gLabels.map(function(g){return genders[g];}), backgroundColor: ['#8b5cf6','#06b6d4','#f43f5e','#cbd5e1'] }] }
           });
-        } catch(e) { console.error('gender chart error:', e); }
+        } catch(e) { console.error('gender chart:', e); }
 
         try {
-          // Chart: Salary Curve
           resetChart('salary');
-          _chartInstances['salary'] = new Chart(document.getElementById('salaryChart'), {
+          _chartInstances['salary'] = MiniChart.create('salaryChart', {
             type: 'line',
-            data: { labels, datasets: [{ label: 'Average Compensation', data: labels.map(l => depts[l].salarySum / depts[l].count), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.05)', fill: true, tension: 0.3 }] },
-            options: { responsive: true, maintainAspectRatio: false }
+            data: { labels: labels, datasets: [{ label: 'Avg Compensation', data: labels.map(function(l){ return depts[l].salarySum / depts[l].count; }), borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.05)' }] }
           });
-        } catch(e) { console.error('salary chart error:', e); }
+        } catch(e) { console.error('salary chart:', e); }
       };
 
       /**
@@ -1271,17 +1466,17 @@
         appendChatMessage('bot', '<i class="fa-solid fa-circle-notch fa-spin"></i> Processing query...', loadId);
 
         google.script.run
-          .withSuccessHandler((response) => {
+          .withSuccessHandler(function(response) {
             document.getElementById(loadId).remove();
-            appendChatMessage('bot', marked.parse(response));
+            appendChatMessage('bot', MiniMD.parse(response));
             resetChatState();
           })
-          .withFailureHandler((error) => {
+          .withFailureHandler(function(error) {
             document.getElementById(loadId).remove();
-            appendChatMessage('bot', `<span style="color:var(--danger)">Connection Error: ${error.message}</span>`);
+            appendChatMessage('bot', '<span style="color:var(--danger)">Connection Error: ' + error.message + '</span>');
             resetChatState();
           })
-          .askChatbot(query, _aiContextStr || "No dataset ingested yet. Awaiting data.");
+          .askChatbot(query, _aiContextStr || 'No dataset ingested yet. Awaiting data.');
       };
 
       const resetChatState = () => {
