@@ -443,10 +443,19 @@
   </div>
 
   <script>
+    // Surface any unhandled JS errors in the status bar
+    window.onerror = function(msg, src, line, col, err) {
+      const el = document.getElementById('statusMessage');
+      if (el) {
+        el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> JS Error (L${line}): ${msg}`;
+        el.style.color = '#ef4444';
+      }
+      console.error('AppController crash:', msg, 'at', src, line, col, err);
+      return false;
+    };
+
     /**
      * Application State & Logic Controller
-     * Encapsulating functionality into a class prevents global namespace pollution
-     * and strictly adheres to modern JavaScript engineering practices.
      */
     const AppController = (() => {
       // Private State
@@ -504,9 +513,17 @@
         }
       };
 
-      // Configuration
-      Chart.defaults.font.family = "'Inter', sans-serif";
-      Chart.defaults.color = '#64748b';
+      // Configuration — guarded in case Chart.js CDN failed to load
+      try {
+        if (typeof Chart !== 'undefined') {
+          Chart.defaults.font.family = "'Inter', sans-serif";
+          Chart.defaults.color = '#64748b';
+        } else {
+          console.warn('Chart.js not loaded — charts will be unavailable.');
+        }
+      } catch(e) {
+        console.warn('Chart config error:', e);
+      }
 
       /**
        * Load data from a specific SQLite table and run ETL
@@ -1199,32 +1216,43 @@
       };
 
       const renderVisuals = (depts, genders) => {
-        const resetChart = (id) => { if(_chartInstances[id]) _chartInstances[id].destroy(); };
+        if (typeof Chart === 'undefined') {
+          console.warn('Chart.js unavailable — skipping chart render.');
+          return;
+        }
+        
+        const resetChart = (id) => { if(_chartInstances[id]) { try { _chartInstances[id].destroy(); } catch(e) {} } };
         const labels = Object.keys(depts);
 
-        // Chart: Departments
-        resetChart('dept');
-        _chartInstances['dept'] = new Chart(document.getElementById('deptChart'), {
-          type: 'bar',
-          data: { labels, datasets: [{ data: labels.map(l => depts[l].count), backgroundColor: '#3b82f6', borderRadius: 6 }] },
-          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-        });
+        try {
+          // Chart: Departments
+          resetChart('dept');
+          _chartInstances['dept'] = new Chart(document.getElementById('deptChart'), {
+            type: 'bar',
+            data: { labels, datasets: [{ data: labels.map(l => depts[l].count), backgroundColor: '#3b82f6', borderRadius: 6 }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+          });
+        } catch(e) { console.error('dept chart error:', e); }
 
-        // Chart: Gender
-        resetChart('gender');
-        _chartInstances['gender'] = new Chart(document.getElementById('genderChart'), {
-          type: 'doughnut',
-          data: { labels: Object.keys(genders), datasets: [{ data: Object.values(genders), backgroundColor: ['#8b5cf6', '#06b6d4', '#f43f5e', '#cbd5e1'] }] },
-          options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'right' } } }
-        });
+        try {
+          // Chart: Gender
+          resetChart('gender');
+          _chartInstances['gender'] = new Chart(document.getElementById('genderChart'), {
+            type: 'doughnut',
+            data: { labels: Object.keys(genders), datasets: [{ data: Object.values(genders), backgroundColor: ['#8b5cf6', '#06b6d4', '#f43f5e', '#cbd5e1'] }] },
+            options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'right' } } }
+          });
+        } catch(e) { console.error('gender chart error:', e); }
 
-        // Chart: Salary Curve
-        resetChart('salary');
-        _chartInstances['salary'] = new Chart(document.getElementById('salaryChart'), {
-          type: 'line',
-          data: { labels, datasets: [{ label: 'Average Compensation', data: labels.map(l => depts[l].salarySum / depts[l].count), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.05)', fill: true, tension: 0.3 }] },
-          options: { responsive: true, maintainAspectRatio: false }
-        });
+        try {
+          // Chart: Salary Curve
+          resetChart('salary');
+          _chartInstances['salary'] = new Chart(document.getElementById('salaryChart'), {
+            type: 'line',
+            data: { labels, datasets: [{ label: 'Average Compensation', data: labels.map(l => depts[l].salarySum / depts[l].count), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.05)', fill: true, tension: 0.3 }] },
+            options: { responsive: true, maintainAspectRatio: false }
+          });
+        } catch(e) { console.error('salary chart error:', e); }
       };
 
       /**
@@ -1289,6 +1317,20 @@
         applySimulation
       };
     })();
+    // Startup CDN library availability check
+    window.addEventListener('DOMContentLoaded', () => {
+      const missing = [];
+      if (typeof Papa === 'undefined') missing.push('PapaParse (CSV parser)');
+      if (typeof XLSX === 'undefined') missing.push('SheetJS (Excel parser)');
+      if (typeof Chart === 'undefined') missing.push('Chart.js (charts)');
+      if (missing.length > 0) {
+        const el = document.getElementById('statusMessage');
+        if (el) {
+          el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> CDN failed: ${missing.join(', ')} — check internet/firewall`;
+          el.style.color = '#ef4444';
+        }
+      }
+    });
   </script>
 </body>
 </html>
