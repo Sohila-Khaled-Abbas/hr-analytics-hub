@@ -1,18 +1,17 @@
-# HR Analytics AI Hub
+# HR Analytics AI Hub & Management System
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Google Apps Script](https://img.shields.io/badge/Google_Apps_Script-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://developers.google.com/apps-script)
 [![Gemini API](https://img.shields.io/badge/Gemini_API-10b981?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
 [![ES6](https://img.shields.io/badge/ES6-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)](https://www.ecma-international.org/ecma-262/6.0/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](http://makeapullrequest.com)
 
-An advanced, serverless Single-Page Application (SPA) built on Google Apps Script. This tool empowers HR professionals to upload raw CSV datasets, processes the data entirely in-memory (client-side) for maximum privacy and speed, and generates interactive dashboards alongside a **Gemini-powered AI chatbot**.
+An advanced, serverless Single-Page Application (SPA) built on Google Apps Script. This tool serves as a comprehensive **HR Management and Analytics System**. It empowers HR professionals to upload raw CSV, Excel, or SQLite database files, parses and manages data entirely in-memory for maximum privacy and performance, and hosts a custom-prompted **Gemini AI chatbot** alongside automated insights, database views, and org simulation pages.
 
 ---
 
 ## Table of Contents
 - [Architecture & Engineering Approach](#architecture--engineering-approach)
-- [Core Features](#core-features)
+- [Core Features & Tabs](#core-features--tabs)
 - [Setup & Local Development](#setup--local-development)
 - [Configuration & Security](#configuration--security)
 - [Deployment](#deployment)
@@ -24,20 +23,33 @@ An advanced, serverless Single-Page Application (SPA) built on Google Apps Scrip
 
 ## Architecture & Engineering Approach
 
-This project abandons the traditional "read/write to Google Sheets" approach in Apps Script in favor of a modern, fast SPA architecture.
+This project bypasses traditional database latency in Apps Script by relying on a browser-first, in-memory architecture:
 
-* **In-Memory ETL**: Utilizes PapaParse to parse CSVs entirely within the user's browser. Data is *never* saved to a database, ensuring strict data privacy for sensitive HR records.
-* **Secure API Handling**: The Gemini API key is securely stored in Google Apps Script `PropertiesService`, completely isolating credentials from the source code.
-* **Modular Frontend**: Compiled to a single HTML file for Apps Script compatibility, but structured using modern ES6+ paradigms (State encapsulation, UI rendering decoupling, and isolated API communication pipelines).
+* **Multiformat Client-side ETL**: Ingests and processes data from **CSV** (via PapaParse), **Excel** (via SheetJS), and **SQLite databases** (via sql.js WebAssembly compilation) directly in the user's browser.
+* **Reactive State Management**: Modifications in the Employee Database or simulations in the Org Simulator trigger an automatic re-evaluation of KPIs, averages, and Chart.js visualizations in real-time.
+* **Secure AI Pipelines**: Utilizes the Google Apps Script `PropertiesService` to store the Gemini API key securely in Google's cloud infrastructure, separating credentials from code while maintaining a direct client-facing service endpoint.
 
 ---
 
-## Core Features
+## Core Features & Tabs
 
-1. **Local Data Ingestion**: Zero-server data uploads. Secure browser-side CSV processing.
-2. **Dynamic KPI Dashboard**: Automatic aggregation of Active Headcount, Average Compensation, Attrition Rate, and Department counts.
-3. **Interactive Visualizations**: Powered by Chart.js (Compensation Curves, Gender Demographics, Departmental Distribution).
-4. **Context-Aware AI Assistant**: A custom-prompted Gemini AI chatbot that analyzes the aggregated semantic context of your dataset in real-time.
+The application features a modern tabbed layout dividing HR actions into dedicated pages:
+
+1. **Workforce Dashboard**:
+   - High-level KPIs: Active Headcount, Average Compensation, Department Count, and Attrition Rate.
+   - Dynamic charts powered by Chart.js (Department Distribution, Gender Diversity, and Compensation Curves).
+2. **Employee Database**:
+   - A fully searchable, filterable data grid listing employee records.
+   - In-memory CRUD operations: Add new employees, edit existing records (salaries, departments, statuses), or delete records with immediate dashboard updates.
+3. **Insights Hub**:
+   - Auto-generated pay equity assessments and gender pay gap calculations.
+   - Attrition risk highlights identifying high-turnover department hotspots.
+   - **Executive AI Report**: A one-click button that prompts Gemini to synthesize the current session data into a structured executive brief.
+4. **Org Simulator**:
+   - Real-time simulation of department-wide salary adjustments using interactive range sliders.
+   - "Live Impact Card" detailing how simulated actions affect total payroll, average wages, and budget headroom before making changes permanent.
+5. **AI Analyst Panel**:
+   - A persistent sidebar assistant capable of answering natural language queries concerning the ingested workforce database.
 
 ---
 
@@ -64,7 +76,6 @@ cd hr-analytics-hub
 # Initialize a new Google Apps Script Web App
 clasp create --type webapp --title "HR Analytics Hub" --rootDir ./src
 ```
-*(Note: If you already have a script, use `clasp clone <script-id>` instead).*
 
 ### 4. Push Code to Google Servers
 ```bash
@@ -110,7 +121,6 @@ hr-analytics-hub/
 │   ├── Code.js              # Server-side API endpoints & App Service
 │   └── Index.html           # Frontend UI, CSS, and Client-side AppController
 ├── appsscript.json          # Google Apps Script manifest file
-├── package.json             # Optional Node dependencies (for local linting/types)
 └── README.md                # Documentation
 ```
 
