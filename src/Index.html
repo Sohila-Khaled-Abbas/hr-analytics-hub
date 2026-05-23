@@ -187,7 +187,7 @@
       <div id="statusMessage" class="status-indicator">Awaiting Data...</div>
       
       <!-- SQLite Table Selection Container (Hidden by default) -->
-      <div id="tableSelectorContainer" style="display: none; margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+      <div id="tableSelectorContainer" style="display: none; margin-top: 12px; flex-direction: column; gap: 6px;">
         <label for="tableSelect" style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-align: left; margin: 0;">SELECT DATABASE TABLE</label>
         <select id="tableSelect" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-family: inherit; font-size: 0.9rem; background: var(--surface); color: var(--text-main); outline: none; transition: border 0.2s;" onchange="AppController.handleTableSelect(event)">
         </select>
@@ -208,15 +208,16 @@
 
   <!-- Main Content Panel with Tabs -->
   <main class="main-content">
-    <header class="dash-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px; flex-wrap: wrap; gap: 16px;">
+    <header class="dash-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 0;">
       <h2 style="margin: 0;">Workforce Intelligence</h2>
-      <nav class="tab-nav">
+      <nav class="tab-nav" style="border-bottom: none; margin-bottom: 0;">
         <button class="tab-btn active" onclick="AppController.switchTab('dashboard')"><i class="fa-solid fa-chart-line"></i> Dashboard</button>
         <button class="tab-btn" onclick="AppController.switchTab('directory')"><i class="fa-solid fa-folder-open"></i> Database</button>
         <button class="tab-btn" onclick="AppController.switchTab('insights')"><i class="fa-solid fa-brain"></i> Insights</button>
         <button class="tab-btn" onclick="AppController.switchTab('simulator')"><i class="fa-solid fa-sliders"></i> Simulator</button>
       </nav>
     </header>
+    <hr style="border: none; border-top: 1px solid var(--border); margin: 0 0 8px 0;">
 
     <!-- Tab 1: Dashboard -->
     <div id="tab-dashboard" class="tab-panel active">
@@ -670,24 +671,37 @@
        * Transform & Cleanse Data (The 'T' in ETL)
        */
       const executeETL = (rawArray) => {
+        if (!rawArray || rawArray.length === 0) {
+          UI.status.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> No data rows found in file.`;
+          UI.status.style.color = "var(--danger)";
+          return;
+        }
+        
         _dataset = rawArray.map(row => {
-          // Dynamic Header Resolution (Robust to schema variations)
-          const findKey = (str) => Object.keys(row).find(k => k.toLowerCase().includes(str.toLowerCase()));
+          // Dynamic Header Resolution — safely returns null if no match
+          const keys = Object.keys(row);
+          const findKey = (str) => keys.find(k => k.toLowerCase().includes(str.toLowerCase())) || null;
           
-          const rawSalary = row[findKey('salary') || findKey('pay')] || '0';
-          const cleanSalary = parseFloat(rawSalary.toString().replace(/[^0-9.-]+/g, ""));
+          const salaryKey = findKey('salary') || findKey('pay') || findKey('wage') || findKey('compensation');
+          const rawSalary = salaryKey ? row[salaryKey] : '0';
+          const cleanSalary = parseFloat(String(rawSalary).replace(/[^0-9.-]+/g, ""));
           
-          const rawStatus = row[findKey('status') || findKey('active')] || 'Active';
-          const isTerminated = /term|inactive/i.test(rawStatus);
+          const statusKey = findKey('status') || findKey('active') || findKey('employment');
+          const rawStatus = statusKey ? row[statusKey] : 'Active';
+          const isTerminated = /term|inactive|left|resigned|fired/i.test(String(rawStatus));
+
+          const idKey = findKey('id') || findKey('emp') || findKey('number') || findKey('code');
+          const deptKey = findKey('department') || findKey('dept') || findKey('team') || findKey('division');
+          const genderKey = findKey('gender') || findKey('sex');
 
           return {
-            id: row[findKey('id') || findKey('emp')] || 'N/A',
-            department: row[findKey('department') || findKey('dept')] || 'Unassigned',
+            id: (idKey ? row[idKey] : null) || `EMP-${Math.random().toString(36).substr(2,6).toUpperCase()}`,
+            department: (deptKey ? String(row[deptKey]).trim() : '') || 'Unassigned',
             salary: isNaN(cleanSalary) ? 0 : cleanSalary,
             status: isTerminated ? 'Terminated' : 'Active',
-            gender: (row[findKey('gender') || findKey('sex')] || 'Not Specified').trim()
+            gender: (genderKey ? String(row[genderKey]).trim() : '') || 'Not Specified'
           };
-        });
+        }).filter(r => r !== null);
 
         UI.status.innerHTML = `<i class="fa-solid fa-circle-check"></i> Ingested ${_dataset.length.toLocaleString()} records`;
         UI.status.style.color = "var(--success)";
